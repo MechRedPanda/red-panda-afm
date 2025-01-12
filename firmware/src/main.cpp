@@ -2,22 +2,22 @@
 #include "ad5761.hpp"
 #include "ads868x.hpp"
 
-
-ADC_ads868x ads868x(1);
-
-void init_adda(){
-  // RESET THE ADC AND DAC
-  ad5761_reset();
-  ads868x.reset();
-}
-
-
 void setup() {
-  ad5761_SPI_init();
-    delay(500); 
-}
+  // Initialize digital pin D2 as an output
+  pinMode(2, OUTPUT);
 
+  // Start serial communication at 115200 baud
+  Serial.begin(115200);
+}
 
 // *** Main Loop *** //
 void loop() {
+  // Check if data is available to read
+  Serial.println('1');
+
+  // Blink the LED on pin D2
+  digitalWrite(2, HIGH);
+  delay(1000);
+  digitalWrite(2, LOW);
+  delay(1000);
 }
