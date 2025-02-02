@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include "ad5761.hpp"
+#include "AD5761.hpp"
 #include "ads868x.hpp"
 #include <SerialTransfer.h>
 #include <CmdParser.hpp>
@@ -19,6 +19,8 @@ ADC_ads868x adc = ADC_ads868x(&opu_spi, 1, 5);
 // Create parser and buffer objects
 CmdParser cmdParser;
 CmdBuffer<64> myBuffer; // Command buffer with a capacity of 64 characters
+
+SerialTransfer myTransfer;
 
 // Command Handlers
 void handleReset()
@@ -67,6 +69,7 @@ void setup()
   opu_spi.begin(VSPI_SCK, VSPI_MISO, VSPI_MOSI, -1); // -1 means no default chip select pin
   // Start serial communication at 115200 baud
   Serial.begin(115200);
+  myTransfer.begin(Serial);
 }
 void loop()
 {
