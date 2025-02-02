@@ -6,19 +6,14 @@
   Initialize the object to be used.
   Create a buffer of size buffer_size, and select the pin connected to cs.
 */
-ADC_ads868x::ADC_ads868x(uint8_t buffer_size)
+ADC_ads868x::ADC_ads868x(SPIClass *spi, uint8_t buffer_size, u_int8_t cs_pin): _cs_pin(cs_pin), spi(spi)
 {
   uint32_t receive_buffer[buffer_size];
   _receive_buffer = receive_buffer;
   _buffer_store_num = 0;
   _buffer_size = buffer_size;
-  _cs_pin = CS_PIN;
 
-  pinMode(CS_PIN, OUTPUT);
-  SPI1 = SPIClass(HSPI);
-  SPI1.begin();
-  SPI1.setClockDivider(SPI_CLOCK_DIV2);
-  reset();
+  pinMode(_cs_pin, OUTPUT);
 }
 
 /*
@@ -38,9 +33,9 @@ void ADC_ads868x::transmit(uint8_t command, uint16_t address, uint16_t data)
     _transmit_bytes[3] = (data&0xFF);
     uint8_t i = 0;
     digitalWrite(_cs_pin,LOW);
-    SPI1.beginTransaction(SPISettings(100000, MSBFIRST, SPI_MODE0));
-    SPI1.transfer(_transmit_bytes,4);
-    SPI1.endTransaction();
+    spi->beginTransaction(SPISettings(100000, MSBFIRST, SPI_MODE0));
+    spi->transfer(_transmit_bytes,4);
+    spi->endTransaction();
     digitalWrite(_cs_pin,HIGH);
     while(i<4){
       _receive_buffer[_buffer_store_num] = (_receive_buffer[_buffer_store_num]<<8);
@@ -89,5 +84,5 @@ uint16_t ADC_ads868x::readADC(void){
 }
 
 void ADC_ads868x::reset(void){
-  transmit(ADS8689_WRITE_FULL, ADS8689_RANGE_SEL_REG, 0x0000);
+  transmit(ADS8689_WRITE_FULL, ADS8689_RANGE_SEL_REG, 0x0004);
 }

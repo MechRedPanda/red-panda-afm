@@ -27,13 +27,12 @@
 #define ADS8689_SET_HWORD   0b1101100
 
 // CSPIN
-#define CS_PIN  27
 
 
 class ADC_ads868x
 {
   public:
-    ADC_ads868x(uint8_t buffer_size);
+    ADC_ads868x(SPIClass *spi, uint8_t buffer_size, uint8_t cs_pin);
     void transmit(uint8_t command,uint16_t address, uint16_t data);
     uint32_t readBuffer(void);
     uint8_t inputAvailable(void);
@@ -41,13 +40,14 @@ class ADC_ads868x
     void clearBuffer(void);
     void reset(void);
   private:
-    SPIClass SPI1;
+    SPIClass *spi;
+    SPISettings _spi_settings = SPISettings(16000000, MSBFIRST, SPI_MODE0);
+    uint8_t _cs_pin;
     uint32_t* _receive_buffer;
     uint8_t _buffer_size;
     uint8_t _buffer_store_num;
     uint32_t _tmp;
     uint8_t _transmit_bytes[4];
-    uint8_t _cs_pin;
 };
 
 #endif
