@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include "AD5761.hpp"
+#include "ad5761.hpp"
 #include "ads868x.hpp"
 #include <SerialTransfer.h>
 #include <CmdParser.hpp>
@@ -55,48 +55,6 @@ void handleDac()
   }
 }
 
-void handleScanDac()
-{
-  const char *param1 = cmdParser.getCmdParam(1); // Get first parameter (start point)
-  const char *param2 = cmdParser.getCmdParam(2); // Get second parameter (end point)
-  const char *param3 = cmdParser.getCmdParam(3); // Get third parameter (number of steps)
-
-  if (param1 == nullptr || param2 == nullptr || param3 == nullptr)
-  {
-    Serial.println("Missing scan parameters");
-    return;
-  }
-
-  int startPoint = atoi(param1); // Convert the first parameter to an integer
-  int endPoint = atoi(param2);   // Convert the second parameter to an integer
-  int steps = atoi(param3);      // Convert the third parameter to an integer
-
-  if (steps <= 0)
-  {
-    Serial.println("Number of steps must be greater than 0");
-    return;
-  }
-
-  int stepSize = (endPoint - startPoint) / steps;
-  if (stepSize <= 0)
-  {
-    Serial.println("Step size must be greater than 0");
-    return;
-  }
-
-  for (int i = 0; i <= steps; i++)
-  {
-    int value = startPoint + i * stepSize;
-    dac_f.write(value);
-    Serial.print("DAC F set to ");
-    Serial.println(value);
-    delay(5); // Add a delay to observe the changes
-    int readValue = adc.readADC();
-    Serial.println(readValue);
-    delay(5); // Add a delay to observe the changes
-  }
-}
-
 void handleAdc()
 {
   Serial.println(adc.readADC());
@@ -130,10 +88,6 @@ void loop()
       else if (strcmp(cmd, "A") == 0)
       {
         handleAdc();
-      }
-      else if (strcmp(cmd, "SCAN") == 0)
-      {
-        handleScanDac();
       }
       else
       {
