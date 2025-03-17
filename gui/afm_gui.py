@@ -12,133 +12,11 @@ import serial.tools.list_ports
 from collections import deque
 import queue
 
+from afm import AFM
+
 # ---------------------------
 # AFM Classes and Plotting
 # ---------------------------
-
-@dataclass
-class AFMStatus:
-    adc_value: int
-    dac_values: dict
-    timestamp: datetime
-    scan_data: list
-
-class AFM:
-    def __init__(self):
-        self.port = None
-        self.baud_rate = None
-        self.serial_connection = None
-        self.afm_status = AFMStatus(adc_value=0, dac_values={"T": 0, "F": 0},
-                                    timestamp=datetime.now(), scan_data=[])
-        self.scan_in_progress = False  # Flag to track scan progress
-        self.scan_data_queue = queue.Queue()  # Thread-safe queue for scan data
-
-    def connect(self, port, baud_rate=115200):
-        """Connect to the AFM device using a serial connection."""
-        self.port = port
-        self.baud_rate = baud_rate
-        try:
-            self.serial_connection = serial.Serial(port, baud_rate, timeout=1)
-            print(f"Successfully connected to {port} at {baud_rate} baud.")
-        except serial.SerialException as e:
-            print(f"Error opening serial port: {e}")
-            self.simulating = True
-
-    def send_command(self, command):
-        """Send a command to the AFM device."""
-        if not self.port:
-            print(f"[SIMULATION] Sending command: {command}")
-        elif self.serial_connection and self.serial_connection.is_open:
-            self.serial_connection.write(f"{command}\n".encode("utf-8"))
-
-    def read_response(self):
-        """Read a response from the AFM device."""
-        if not self.port:
-            return ''
-        elif self.serial_connection and self.serial_connection.is_open:
-            try:
-                return self.serial_connection.readline().decode("utf-8").strip()
-            except Exception as e:
-                print(f"Error reading from AFM: {e}")
-                return None
-        return None
-
-    def control_dac(self, channel, value):
-        """Control DAC channels."""
-        if channel not in self.afm_status.dac_values:
-            print(f"Invalid DAC channel: {channel}")
-            return
-        self.afm_status.dac_values[channel] = value
-        self.send_command(f"DAC {channel} {value}")
-
-    def read_adc(self):
-        """Read the current ADC value."""
-        if not self.port:
-            return random.randint(2**15, 2**15 + 10000)
-        self.send_command("A")
-        response = self.read_response()
-        try:
-            self.afm_status.adc_value = int(response)
-            return self.afm_status.adc_value
-        except (ValueError, TypeError):
-            print(f"Invalid ADC response: {response}")
-            return None
-
-    def set_dac(self, channel, value):
-        """Set the DAC value for a specific channel with range checking."""
-        if channel not in self.afm_status.dac_values:
-            print(f"Invalid DAC channel: {channel}")
-            return
-        # Enforce 16-bit DAC range: 0 to 65535
-        value = max(0, min(65535, value))
-        self.afm_status.dac_values[channel] = value
-        self.send_command(f"D {channel} {value}")
-    
-    def reset(self):
-        """Reset the AFM device to its initial state."""
-        if not self.port:
-            print("[SIMULATION] Resetting AFM device.")
-            return
-        self.send_command("RESET")
-
-    def start_scan(self, start, end, num_points):
-        """Start a scan from start to end with a specified number of points."""
-        self.scan_in_progress = True
-        self.scan_thread = threading.Thread(target=self._scan, args=(start, end, num_points), daemon=True)
-        self.scan_thread.start()
-
-    def _scan(self, start, end, num_points):
-        """Perform the scan in a separate thread."""
-        step_size = (end - start) / (num_points - 1)
-
-        if not self.port:
-            for i in range(num_points):
-                if not self.scan_in_progress:
-                    break  # Exit early if scan is stopped
-                step_value = int(start + i * step_size)
-                adc_value = random.randint(2**15, 2**15 + 10000)
-                self.scan_data_queue.put((step_value, adc_value))
-                time.sleep(0.2)  # Simulate AFM stabilization time
-            self.scan_in_progress = False
-            return
-
-        for i in range(num_points):
-            if not self.scan_in_progress:
-                break
-            step_value = int(start + i * step_size)
-            self.set_dac("F", step_value)
-            time.sleep(0.1)  # Wait for the AFM to stabilize
-            adc_value = self.read_adc()
-            self.scan_data_queue.put((step_value, adc_value))
-        self.scan_in_progress = False
-
-    def stop_scan(self):
-        """Stop the scan if it is running."""
-        print("Stopping scan...")
-        if hasattr(self, 'scan_thread') and self.scan_thread.is_alive():
-            self.scan_in_progress = False
-            self.scan_thread.join()
-            print("Scan stopped.")
 
 
 class RealtimePlot:
@@ -233,15 +111,19 @@ class AFM_GUI:
         serial_frame = ttk.LabelFrame(self.root, text="Serial Port Settings")
         serial_frame.grid(row=0, column=0, padx=10, pady=5, sticky="ew")
 
-        ttk.Label(serial_frame, text="Port:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.port_combobox = ttk.Combobox(serial_frame, state="readonly", width=20)
+        ttk.Label(serial_frame, text="Port:").grid(
+            row=0, column=0, padx=5, pady=5, sticky="w")
+        self.port_combobox = ttk.Combobox(
+            serial_frame, state="readonly", width=20)
         self.port_combobox.grid(row=0, column=1, padx=5, pady=5, sticky="w")
         self.refresh_ports()
 
-        self.refresh_button = ttk.Button(serial_frame, text="Refresh", command=self.refresh_ports)
+        self.refresh_button = ttk.Button(
+            serial_frame, text="Refresh", command=self.refresh_ports)
         self.refresh_button.grid(row=0, column=2, padx=5, pady=5, sticky="w")
 
-        ttk.Label(serial_frame, text="Baud Rate:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(serial_frame, text="Baud Rate:").grid(
+            row=1, column=0, padx=5, pady=5, sticky="w")
         self.baud_entry = ttk.Entry(serial_frame, width=10)
         self.baud_entry.insert(0, "115200")
         self.baud_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
@@ -251,10 +133,12 @@ class AFM_GUI:
         afm_ctrl_frame = ttk.LabelFrame(self.root, text="AFM Controls")
         afm_ctrl_frame.grid(row=1, column=0, padx=10, pady=5, sticky="ew")
 
-        self.connect_button = ttk.Button(afm_ctrl_frame, text="Connect", command=self.connect_afm)
+        self.connect_button = ttk.Button(
+            afm_ctrl_frame, text="Connect", command=self.connect_afm)
         self.connect_button.grid(row=0, column=0, padx=5, pady=5)
 
-        self.reset_button = ttk.Button(afm_ctrl_frame, text="Reset AFM", command=self.afm.reset)
+        self.reset_button = ttk.Button(
+            afm_ctrl_frame, text="Reset AFM", command=self.afm.reset)
         self.reset_button.grid(row=0, column=1, padx=5, pady=5)
 
     def create_plot_control_panel(self):
@@ -262,10 +146,12 @@ class AFM_GUI:
         plot_ctrl_frame = ttk.LabelFrame(self.root, text="Plot Controls")
         plot_ctrl_frame.grid(row=2, column=0, padx=10, pady=5, sticky="ew")
 
-        self.plot_button = ttk.Button(plot_ctrl_frame, text="Plot Realtime", command=self.start_realtime_plot)
+        self.plot_button = ttk.Button(
+            plot_ctrl_frame, text="Plot Realtime", command=self.start_realtime_plot)
         self.plot_button.grid(row=0, column=0, padx=5, pady=5)
 
-        self.pause_button = ttk.Button(plot_ctrl_frame, text="Pause Realtime", command=self.pause_plot)
+        self.pause_button = ttk.Button(
+            plot_ctrl_frame, text="Pause Realtime", command=self.pause_plot)
         self.pause_button.grid(row=0, column=1, padx=5, pady=5)
 
     def create_scan_control_panel(self):
@@ -273,25 +159,30 @@ class AFM_GUI:
         scan_frame = ttk.LabelFrame(self.root, text="Scan Control")
         scan_frame.grid(row=3, column=0, padx=10, pady=5, sticky="ew")
 
-        ttk.Label(scan_frame, text="Start:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(scan_frame, text="Start:").grid(
+            row=0, column=0, padx=5, pady=5, sticky="w")
         self.start_entry = ttk.Entry(scan_frame, width=10)
         self.start_entry.insert(0, "10000")
         self.start_entry.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
-        ttk.Label(scan_frame, text="End:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(scan_frame, text="End:").grid(
+            row=1, column=0, padx=5, pady=5, sticky="w")
         self.end_entry = ttk.Entry(scan_frame, width=10)
         self.end_entry.insert(0, "50000")
         self.end_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
-        ttk.Label(scan_frame, text="Steps:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(scan_frame, text="Steps:").grid(
+            row=2, column=0, padx=5, pady=5, sticky="w")
         self.steps_entry = ttk.Entry(scan_frame, width=10)
         self.steps_entry.insert(0, "100")
         self.steps_entry.grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
-        self.start_scan_button = ttk.Button(scan_frame, text="Start Scan", command=self.start_scan)
+        self.start_scan_button = ttk.Button(
+            scan_frame, text="Start Scan", command=self.start_scan)
         self.start_scan_button.grid(row=3, column=0, padx=5, pady=5)
 
-        self.stop_scan_button = ttk.Button(scan_frame, text="Stop Scan", command=self.stop_scan)
+        self.stop_scan_button = ttk.Button(
+            scan_frame, text="Stop Scan", command=self.stop_scan)
         self.stop_scan_button.grid(row=3, column=1, padx=5, pady=5)
 
     def create_dac_control_panel(self):
@@ -300,16 +191,23 @@ class AFM_GUI:
         dac_frame.grid(row=4, column=0, padx=10, pady=5, sticky="ew")
 
         # Current DAC values for channels F and T
-        ttk.Label(dac_frame, text="F Channel:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.f_dac_value = tk.StringVar(value=str(self.afm.afm_status.dac_values["F"]))
-        ttk.Label(dac_frame, textvariable=self.f_dac_value, width=10).grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ttk.Label(dac_frame, text="F Channel:").grid(
+            row=0, column=0, padx=5, pady=5, sticky="w")
+        self.f_dac_value = tk.StringVar(
+            value=str(self.afm.afm_status.dac_values["F"]))
+        ttk.Label(dac_frame, textvariable=self.f_dac_value, width=10).grid(
+            row=0, column=1, padx=5, pady=5, sticky="w")
 
-        ttk.Label(dac_frame, text="T Channel:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.t_dac_value = tk.StringVar(value=str(self.afm.afm_status.dac_values["T"]))
-        ttk.Label(dac_frame, textvariable=self.t_dac_value, width=10).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        ttk.Label(dac_frame, text="T Channel:").grid(
+            row=1, column=0, padx=5, pady=5, sticky="w")
+        self.t_dac_value = tk.StringVar(
+            value=str(self.afm.afm_status.dac_values["T"]))
+        ttk.Label(dac_frame, textvariable=self.t_dac_value, width=10).grid(
+            row=1, column=1, padx=5, pady=5, sticky="w")
 
         # Step Size entry for DAC adjustments
-        ttk.Label(dac_frame, text="Step Size:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        ttk.Label(dac_frame, text="Step Size:").grid(
+            row=2, column=0, padx=5, pady=5, sticky="w")
         self.step_entry = ttk.Entry(dac_frame, width=10)
         self.step_entry.insert(0, "100")
         self.step_entry.grid(row=2, column=1, padx=5, pady=5, sticky="w")
@@ -319,23 +217,23 @@ class AFM_GUI:
         arrow_frame.grid(row=3, column=0, columnspan=2, pady=10)
 
         # Up arrow (increases F channel)
-        self.up_button = ttk.Button(arrow_frame, text="↑", 
-                                     command=lambda: self.adjust_dac("F", +self.get_step()))
+        self.up_button = ttk.Button(arrow_frame, text="↑",
+                                    command=lambda: self.adjust_dac("F", +self.get_step()))
         self.up_button.grid(row=0, column=1, padx=5, pady=5)
 
         # Left arrow (decreases T channel)
-        self.left_button = ttk.Button(arrow_frame, text="←", 
-                                       command=lambda: self.adjust_dac("T", -self.get_step()))
+        self.left_button = ttk.Button(arrow_frame, text="←",
+                                      command=lambda: self.adjust_dac("T", -self.get_step()))
         self.left_button.grid(row=1, column=0, padx=5, pady=5)
 
         # Right arrow (increases T channel)
-        self.right_button = ttk.Button(arrow_frame, text="→", 
-                                        command=lambda: self.adjust_dac("T", +self.get_step()))
+        self.right_button = ttk.Button(arrow_frame, text="→",
+                                       command=lambda: self.adjust_dac("T", +self.get_step()))
         self.right_button.grid(row=1, column=2, padx=5, pady=5)
 
         # Down arrow (decreases F channel)
-        self.down_button = ttk.Button(arrow_frame, text="↓", 
-                                       command=lambda: self.adjust_dac("F", -self.get_step()))
+        self.down_button = ttk.Button(arrow_frame, text="↓",
+                                      command=lambda: self.adjust_dac("F", -self.get_step()))
         self.down_button.grid(row=2, column=1, padx=5, pady=5)
 
     def get_step(self):
