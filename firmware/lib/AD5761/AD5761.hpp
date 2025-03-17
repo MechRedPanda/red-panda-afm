@@ -37,7 +37,7 @@ public:
   // mode
   // 0b0000000101000 -10V, +10V
   // 0b0000000101101 -3 to 3V
-  AD5761(SPIClass *spi, int8_t cs, uint16_t mode) : spi(spi), _cs(cs), _mode(mode)
+  AD5761(SPIClass *spi, int8_t cs, uint16_t mode) : _spi(spi), _cs(cs), _mode(mode)
   {
     pinMode(_cs, OUTPUT);
     digitalWrite(_cs, HIGH);
@@ -53,7 +53,7 @@ public:
 private:
   int8_t _cs;
   uint16_t _mode;
-  SPIClass *spi;
+  SPIClass *_spi;
   SPISettings _spi_settings = SPISettings(1000000, MSBFIRST, SPI_MODE2);
   byte _spi_buffer[3];
 };
