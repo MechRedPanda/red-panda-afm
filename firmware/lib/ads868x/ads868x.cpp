@@ -16,6 +16,7 @@ ADC_ads868x::ADC_ads868x(SPIClass *spi, uint8_t buffer_size, u_int8_t cs_pin): _
   pinMode(_cs_pin, OUTPUT);
 }
 
+
 /*
   Transmit a properly formatted message.
   Provide the command (from the headers), the address associated with it,
@@ -33,7 +34,7 @@ void ADC_ads868x::transmit(uint8_t command, uint16_t address, uint16_t data)
     _transmit_bytes[3] = (data&0xFF);
     uint8_t i = 0;
     digitalWrite(_cs_pin,LOW);
-    spi->beginTransaction(SPISettings(100000, MSBFIRST, SPI_MODE0));
+    spi->beginTransaction(_spi_settings);
     spi->transfer(_transmit_bytes,4);
     spi->endTransaction();
     digitalWrite(_cs_pin,HIGH);

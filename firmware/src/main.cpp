@@ -33,7 +33,8 @@ AD5761 dac_x = AD5761(&driver_spi, 15, 0b0000000101000); // Constructor
 AD5761 dac_y = AD5761(&driver_spi, 2, 0b0000000101000);  // Constructor
 AD5761 dac_z = AD5761(&driver_spi, 4, 0b0000000101000);  // Constructor
 
-// ADC_ads868x adc = ADC_ads868x(&opu_spi, 1, 5);
+ADC_ads868x adc_fe = ADC_ads868x(&opu_spi, 1, 21);
+ADC_ads868x adc_rf = ADC_ads868x(&opu_spi, 1, 5);
 
 // Create parser and buffer objects
 CmdParser cmdParser;
@@ -47,7 +48,8 @@ void handleReset()
   dac_x.reset();
   dac_y.reset();
   dac_z.reset();
-  // adc.reset();
+  adc_fe.reset();
+  adc_rf.reset();
   Serial.println("Reset complete");
 }
 
@@ -92,7 +94,26 @@ void handleDac()
 
 void handleAdc()
 {
-  // Serial.println(adc.readADC());
+  const char *param1 = cmdParser.getCmdParam(1); // Get first parameter (e.g., "FE" or "RF")
+
+  if (param1 == nullptr)
+  {
+    Serial.println("Missing ADC subcommand");
+    return;
+  }
+
+  if (strcmp(param1, "FE") == 0)
+  {
+    Serial.println(adc_fe.readADC());
+  }
+  else if (strcmp(param1, "RF") == 0)
+  {
+    Serial.println(adc_rf.readADC());
+  }
+  else
+  {
+    Serial.println("Unknown ADC subcommand");
+  }
 }
 
 void handleTriangleWave()

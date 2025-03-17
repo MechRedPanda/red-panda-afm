@@ -8,6 +8,9 @@
         "vector": "cpp",
         "string_view": "cpp",
         "initializer_list": "cpp",
-        "*.tcc": "cpp"
+        "*.tcc": "cpp",
+        "memory": "cpp",
+        "random": "cpp",
+        "optional": "cpp"
     }
 }
