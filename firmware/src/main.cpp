@@ -118,7 +118,7 @@ void handleAdc()
 
 void handleTriangleWave()
 {
-  const int frequency = 1;                      // Hz
+  const int frequency = 1000;                      // Hz
   const int period = 1000000 / frequency;       // Period in microseconds
   const int amplitude = 20000;                  // Example amplitude value, adjust as needed
   const int center = 32767;                     // Center point
