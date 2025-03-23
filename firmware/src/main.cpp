@@ -116,47 +116,52 @@ void handleAdc()
   }
 }
 
-void handleTriangleWave()
+void handleTriangleWave(int numPeriods)
 {
   const int frequency = 1;                      // Hz
   const int period = 1000000 / frequency;       // Period in microseconds
   const int amplitude = 30000;                  // Example amplitude value, adjust as needed
   const int center = 32767;                     // Center point
-  const int steps = 100;                        // Number of steps per half-period (adjust for smoothness)
-  const int stepDelay = (period / 2) / steps;   // Delay per step
+  const int steps = 100;                        // Number of steps per phase (adjust for smoothness)
+  const int stepDelay = period / (3 * steps);   // Delay per step
   const int stepSize = (2 * amplitude) / steps; // Value increment per step
 
   AD5761 *axes[] = {&dac_x, &dac_y}; // Array of DACs for alternating motion
   int currentAxis = 0;               // Start with X
 
-  unsigned long startTime = millis();
-  while (millis() - startTime < 40000) // Run for 40 seconds (10s X, 10s Y, repeat)
+  for (int periodCount = 0; periodCount < numPeriods; periodCount++)
   {
     AD5761 *dac = axes[currentAxis];
 
-    unsigned long waveStartTime = millis();
-    while (millis() - waveStartTime < 10000) // Run for 10 seconds per axis
-    {
-      // Rising ramp
-      for (int i = 0; i <= steps; i++)
-      {
-        dac->write(center - amplitude + i * stepSize);
-        delayMicroseconds(stepDelay);
-      }
+    dac->write(center); // Ensure starting at center
+    delayMicroseconds(stepDelay);
 
-      // Falling ramp
-      for (int i = 0; i <= steps; i++)
-      {
-        dac->write(center + amplitude - i * stepSize);
-        delayMicroseconds(stepDelay);
-      }
+    // Ramp up to center + amplitude
+    for (int i = 0; i <= steps; i++)
+    {
+      dac->write(center + i * (amplitude / steps));
+      delayMicroseconds(stepDelay);
     }
 
-    dac->write(center); // Reset to center point
-    currentAxis = 1 - currentAxis; // Toggle between X (0) and Y (1)
+    // Ramp down to center - amplitude
+    for (int i = 0; i <= steps; i++)
+    {
+      dac->write(center + amplitude - i * stepSize);
+      delayMicroseconds(stepDelay);
+    }
+
+    // Return to center
+    for (int i = 0; i <= steps; i++)
+    {
+      dac->write(center - amplitude + i * stepSize);
+      delayMicroseconds(stepDelay);
+    }
+
+    dac->write(center); // Ensure returning to center
+
+    currentAxis = 1 - currentAxis; // Toggle between X and Y for next period
   }
 }
-
 
 void stepMotor(int steps, int delayMicros)
 {
@@ -195,6 +200,28 @@ void testStepMotor(char direction, int steps)
   Serial.println("Stepper motor test complete.");
 }
 
+void toneDAC(AD5761 &dac, int frequency, int duration = -1)
+{
+  const int center = 32767;                  // Midpoint of DAC output
+  const int amplitude = 1000;                // Amplitude of the waveform
+  const int halfPeriod = 500000 / frequency; // Half-period in microseconds (for square wave)
+
+  unsigned long startTime = millis(); // Track start time
+
+  while (duration < 0 || millis() - startTime < duration)
+  {
+    // High phase
+    dac.write(center + amplitude);
+    delayMicroseconds(halfPeriod);
+
+    // Low phase
+    dac.write(center - amplitude);
+    delayMicroseconds(halfPeriod);
+  }
+
+  dac.write(center); // Reset to center voltage when done
+}
+
 void handleMotor()
 {
   const char *param1 = cmdParser.getCmdParam(1); // Direction (F or B)
@@ -210,6 +237,45 @@ void handleMotor()
   int steps = atoi(param2);
 
   testStepMotor(direction, steps);
+}
+
+void handleTone()
+{
+  const char *param1 = cmdParser.getCmdParam(1); // DAC identifier (e.g., "T", "F", "X", etc.)
+  const char *param2 = cmdParser.getCmdParam(2); // Frequency (Hz)
+  const char *param3 = cmdParser.getCmdParam(3); // Duration (ms), optional
+
+  if (param1 == nullptr || param2 == nullptr)
+  {
+    Serial.println("Invalid tone command. Use: P <DAC> <frequency> [duration]");
+    return;
+  }
+
+  int frequency = atoi(param2);
+  int duration = (param3 != nullptr) ? atoi(param3) : -1; // If no duration is provided, play indefinitely
+
+  AD5761 *selectedDAC = nullptr;
+
+  if (strcmp(param1, "T") == 0)
+    selectedDAC = &dac_t;
+  else if (strcmp(param1, "F") == 0)
+    selectedDAC = &dac_f;
+  else if (strcmp(param1, "X") == 0)
+    selectedDAC = &dac_x;
+  else if (strcmp(param1, "Y") == 0)
+    selectedDAC = &dac_y;
+  else if (strcmp(param1, "Z") == 0)
+    selectedDAC = &dac_z;
+  else
+  {
+    Serial.println("Unknown DAC identifier.");
+    return;
+  }
+
+  if (selectedDAC)
+  {
+    toneDAC(*selectedDAC, frequency, duration);
+  }
 }
 
 void setup()
@@ -251,11 +317,15 @@ void loop()
       }
       else if (strcmp(cmd, "T") == 0)
       {
-        handleTriangleWave();
+        handleTriangleWave(40);
       }
       else if (strcmp(cmd, "M") == 0)
       {
         handleMotor();
+      }
+      else if (strcmp(cmd, "P") == 0)
+      {
+        handleTone();
       }
       else
       {
