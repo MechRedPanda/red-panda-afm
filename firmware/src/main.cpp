@@ -126,25 +126,37 @@ void handleTriangleWave()
   const int stepDelay = (period / 2) / steps;   // Delay per step
   const int stepSize = (2 * amplitude) / steps; // Value increment per step
 
-  unsigned long startTime = micros();
-  while (micros() - startTime < 10000000) // Run for 10 second
+  AD5761 *axes[] = {&dac_x, &dac_y}; // Array of DACs for alternating motion
+  int currentAxis = 0;               // Start with X
+
+  unsigned long startTime = millis();
+  while (millis() - startTime < 40000) // Run for 40 seconds (10s X, 10s Y, repeat)
   {
-    // Rising ramp
-    for (int i = 0; i <= steps; i++)
+    AD5761 *dac = axes[currentAxis];
+
+    unsigned long waveStartTime = millis();
+    while (millis() - waveStartTime < 10000) // Run for 10 seconds per axis
     {
-      dac_x.write(center - amplitude + i * stepSize);
-      delayMicroseconds(stepDelay);
+      // Rising ramp
+      for (int i = 0; i <= steps; i++)
+      {
+        dac->write(center - amplitude + i * stepSize);
+        delayMicroseconds(stepDelay);
+      }
+
+      // Falling ramp
+      for (int i = 0; i <= steps; i++)
+      {
+        dac->write(center + amplitude - i * stepSize);
+        delayMicroseconds(stepDelay);
+      }
     }
 
-    // Falling ramp
-    for (int i = 0; i <= steps; i++)
-    {
-      dac_x.write(center + amplitude - i * stepSize);
-      delayMicroseconds(stepDelay);
-    }
+    dac->write(center); // Reset to center point
+    currentAxis = 1 - currentAxis; // Toggle between X (0) and Y (1)
   }
-  dac_x.write(center); // Reset to center point
 }
+
 
 void stepMotor(int steps, int delayMicros)
 {
