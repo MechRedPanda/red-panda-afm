@@ -23,6 +23,8 @@
 #define HSPI_MISO 12
 #define HSPI_MOSI 13
 
+#define REST 0
+
 SPIClass opu_spi = SPIClass(VSPI);
 SPIClass driver_spi = SPIClass(HSPI);
 
@@ -118,48 +120,50 @@ void handleAdc()
 
 void handleTriangleWave(int numPeriods)
 {
-  const int frequency = 1;                      // Hz
-  const int period = 1000000 / frequency;       // Period in microseconds
-  const int amplitude = 30000;                  // Example amplitude value, adjust as needed
-  const int center = 32767;                     // Center point
-  const int steps = 100;                        // Number of steps per phase (adjust for smoothness)
-  const int stepDelay = period / (3 * steps);   // Delay per step
-  const int stepSize = (2 * amplitude) / steps; // Value increment per step
+  const int frequency = 1;                    // Hz
+  const int period = 1000000 / frequency;     // Period in microseconds
+  const int amplitude = 30000;                // Example amplitude value
+  const int center = 32767;                   // 16-bit signed midpoint
+  const int steps = 1000;                     // Steps per phase
+  const int stepDelay = period / (4 * steps); // Delay per step
+  const int stepSize = amplitude / steps;     // Full swing step (600)
 
-  AD5761 *axes[] = {&dac_x, &dac_y}; // Array of DACs for alternating motion
+  AD5761 *axes[] = {&dac_x, &dac_y}; // X/Y DAC array
   int currentAxis = 0;               // Start with X
 
-  for (int periodCount = 0; periodCount < numPeriods; periodCount++)
+  for (int swapCount = 0; swapCount < 10; swapCount++)
   {
-    AD5761 *dac = axes[currentAxis];
-
-    dac->write(center); // Ensure starting at center
-    delayMicroseconds(stepDelay);
-
-    // Ramp up to center + amplitude
-    for (int i = 0; i <= steps; i++)
+    for (int periodCount = 0; periodCount < numPeriods * 10; periodCount++)
     {
-      dac->write(center + i * (amplitude / steps));
+      AD5761 *dac = axes[currentAxis];
+
+      dac->write(center); // Start at center
       delayMicroseconds(stepDelay);
+
+      // Ramp up: Center -> +Amplitude (100 steps)
+      for (int i = 0; i <= steps; i++)
+      {
+        dac->write(center + i * (amplitude / steps)); //
+        delayMicroseconds(stepDelay);
+      }
+
+      // Ramp down: +Amplitude -> -Amplitude (200 steps)
+      for (int i = 0; i <= steps * 2; i++)
+      {
+        dac->write(center + amplitude - i * stepSize); //
+        delayMicroseconds(stepDelay);
+      }
+
+      // Corrected return phase: -Amplitude -> Center (100 steps)
+      for (int i = 0; i <= steps; i++)
+      {
+        dac->write(center - amplitude + i * (amplitude / steps)); // +300/step
+        delayMicroseconds(stepDelay);
+      }
+
+      dac->write(center); // Final center alignment
     }
-
-    // Ramp down to center - amplitude
-    for (int i = 0; i <= steps; i++)
-    {
-      dac->write(center + amplitude - i * stepSize);
-      delayMicroseconds(stepDelay);
-    }
-
-    // Return to center
-    for (int i = 0; i <= steps; i++)
-    {
-      dac->write(center - amplitude + i * stepSize);
-      delayMicroseconds(stepDelay);
-    }
-
-    dac->write(center); // Ensure returning to center
-
-    currentAxis = 1 - currentAxis; // Toggle between X and Y for next period
+    currentAxis = 1 - currentAxis; // Toggle X/Y
   }
 }
 
@@ -203,23 +207,42 @@ void testStepMotor(char direction, int steps)
 void toneDAC(AD5761 &dac, int frequency, int duration = -1)
 {
   const int center = 32767;                  // Midpoint of DAC output
-  const int amplitude = 1000;                // Amplitude of the waveform
+  const int amplitude = 5000;                // Amplitude of the waveform
   const int halfPeriod = 500000 / frequency; // Half-period in microseconds (for square wave)
 
   unsigned long startTime = millis(); // Track start time
 
   while (duration < 0 || millis() - startTime < duration)
   {
+    unsigned long t1 = micros(); // Record the start time before writing
+
     // High phase
     dac.write(center + amplitude);
-    delayMicroseconds(halfPeriod);
+    unsigned long t2 = micros(); // Measure time after write
+    int elapsed = t2 - t1;       // Time taken by dac.write()
+    if (elapsed < halfPeriod)
+    {
+      delayMicroseconds(halfPeriod - elapsed);
+    }
+
+    t1 = micros(); // Record time before second write
 
     // Low phase
     dac.write(center - amplitude);
-    delayMicroseconds(halfPeriod);
+    t2 = micros();
+    elapsed = t2 - t1;
+    if (elapsed < halfPeriod)
+    {
+      delayMicroseconds(halfPeriod - elapsed);
+    }
   }
 
   dac.write(center); // Reset to center voltage when done
+}
+
+void toneDAC(int frequency, int duration = -1)
+{
+  toneDAC(dac_z, frequency, duration);
 }
 
 void handleMotor()
@@ -237,6 +260,154 @@ void handleMotor()
   int steps = atoi(param2);
 
   testStepMotor(direction, steps);
+}
+
+int tempo = 120;
+
+int melody[][2] = {
+    {440, -4},
+    {440, -4},
+    {440, 16},
+    {440, 16},
+    {440, 16},
+    {440, 16},
+    {349, 8},
+    {REST, 8},
+    {440, -4},
+    {440, -4},
+    {440, 16},
+    {440, 16},
+    {440, 16},
+    {440, 16},
+    {349, 8},
+    {REST, 8},
+    {440, 4},
+    {440, 4},
+    {440, 4},
+    {349, -8},
+    {523, 16},
+    {440, 4},
+    {349, -8},
+    {523, 16},
+    {440, 2},
+    {659, 4},
+    {659, 4},
+    {659, 4},
+    {698, -8},
+    {523, 16},
+    {440, 4},
+    {349, -8},
+    {523, 16},
+    {440, 2},
+    {880, 4},
+    {440, -8},
+    {440, 16},
+    {880, 4},
+    {831, -8},
+    {784, 16},
+    {622, 16},
+    {587, 16},
+    {622, 8},
+    {REST, 8},
+    {440, 8},
+    {622, 4},
+    {587, -8},
+    {554, 16},
+    {523, 16},
+    {494, 16},
+    {523, 16},
+    {REST, 8},
+    {349, 8},
+    {415, 4},
+    {349, -8},
+    {440, -16},
+    {523, 4},
+    {440, -8},
+    {523, 16},
+    {659, 2},
+    {880, 4},
+    {440, -8},
+    {440, 16},
+    {880, 4},
+    {831, -8},
+    {784, 16},
+    {622, 16},
+    {587, 16},
+    {622, 8},
+    {REST, 8},
+    {440, 8},
+    {622, 4},
+    {587, -8},
+    {554, 16},
+    {523, 16},
+    {494, 16},
+    {523, 16},
+    {REST, 8},
+    {349, 8},
+    {415, 4},
+    {349, -8},
+    {440, -16},
+    {440, 4},
+    {349, -8},
+    {523, 16},
+    {440, 2},
+};
+
+int notes = sizeof(melody) / sizeof(melody[0]);
+int wholenote = (60000 * 4) / tempo;
+
+void imperialmarch()
+{
+  for (int i = 0; i < notes; i++)
+  {
+    int frequency = melody[i][0];
+    int duration;
+    int divider = melody[i][1];
+
+    if (divider > 0)
+    {
+      duration = wholenote / divider;
+    }
+    else
+    {
+      duration = (wholenote / abs(divider)) * 1.5;
+    }
+
+    if (frequency != REST)
+    {
+      toneDAC(frequency, duration * 0.9);
+    }
+    delay(duration * 0.1);
+  }
+}
+
+void playNokiaRingtone()
+{
+  int tempo = 180;
+  int melody[] = {
+      659, 8, 587, 8, 370, 4, 415, 4,
+      554, 8, 494, 8, 294, 4, 330, 4,
+      494, 8, 440, 8, 277, 4, 330, 4,
+      440, 2};
+
+  int notes = sizeof(melody) / sizeof(melody[0]) / 2;
+  int wholenote = (60000 * 4) / tempo;
+  int divider = 0, noteDuration = 0;
+
+  for (int thisNote = 0; thisNote < notes * 2; thisNote += 2)
+  {
+    divider = melody[thisNote + 1];
+    if (divider > 0)
+    {
+      noteDuration = wholenote / divider;
+    }
+    else
+    {
+      noteDuration = (wholenote / abs(divider)) * 1.5;
+    }
+
+    toneDAC(melody[thisNote], noteDuration * 0.9);
+  }
 }
 
 void handleTone()
@@ -317,7 +488,7 @@ void loop()
       }
       else if (strcmp(cmd, "T") == 0)
       {
-        handleTriangleWave(40);
+        handleTriangleWave(1);
       }
       else if (strcmp(cmd, "M") == 0)
       {
@@ -325,7 +496,9 @@ void loop()
       }
       else if (strcmp(cmd, "P") == 0)
       {
-        handleTone();
+        // playNokiaRingtone();
+        // playHappyBirthday();
+        imperialmarch();
       }
       else
       {
