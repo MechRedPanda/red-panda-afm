@@ -262,125 +262,6 @@ void handleMotor()
   testStepMotor(direction, steps);
 }
 
-int tempo = 120;
-
-int melody[][2] = {
-    {440, -4},
-    {440, -4},
-    {440, 16},
-    {440, 16},
-    {440, 16},
-    {440, 16},
-    {349, 8},
-    {REST, 8},
-    {440, -4},
-    {440, -4},
-    {440, 16},
-    {440, 16},
-    {440, 16},
-    {440, 16},
-    {349, 8},
-    {REST, 8},
-    {440, 4},
-    {440, 4},
-    {440, 4},
-    {349, -8},
-    {523, 16},
-    {440, 4},
-    {349, -8},
-    {523, 16},
-    {440, 2},
-    {659, 4},
-    {659, 4},
-    {659, 4},
-    {698, -8},
-    {523, 16},
-    {440, 4},
-    {349, -8},
-    {523, 16},
-    {440, 2},
-    {880, 4},
-    {440, -8},
-    {440, 16},
-    {880, 4},
-    {831, -8},
-    {784, 16},
-    {622, 16},
-    {587, 16},
-    {622, 8},
-    {REST, 8},
-    {440, 8},
-    {622, 4},
-    {587, -8},
-    {554, 16},
-    {523, 16},
-    {494, 16},
-    {523, 16},
-    {REST, 8},
-    {349, 8},
-    {415, 4},
-    {349, -8},
-    {440, -16},
-    {523, 4},
-    {440, -8},
-    {523, 16},
-    {659, 2},
-    {880, 4},
-    {440, -8},
-    {440, 16},
-    {880, 4},
-    {831, -8},
-    {784, 16},
-    {622, 16},
-    {587, 16},
-    {622, 8},
-    {REST, 8},
-    {440, 8},
-    {622, 4},
-    {587, -8},
-    {554, 16},
-    {523, 16},
-    {494, 16},
-    {523, 16},
-    {REST, 8},
-    {349, 8},
-    {415, 4},
-    {349, -8},
-    {440, -16},
-    {440, 4},
-    {349, -8},
-    {523, 16},
-    {440, 2},
-};
-
-int notes = sizeof(melody) / sizeof(melody[0]);
-int wholenote = (60000 * 4) / tempo;
-
-void imperialmarch()
-{
-  for (int i = 0; i < notes; i++)
-  {
-    int frequency = melody[i][0];
-    int duration;
-    int divider = melody[i][1];
-
-    if (divider > 0)
-    {
-      duration = wholenote / divider;
-    }
-    else
-    {
-      duration = (wholenote / abs(divider)) * 1.5;
-    }
-
-    if (frequency != REST)
-    {
-      toneDAC(frequency, duration * 0.9);
-    }
-    delay(duration * 0.1);
-  }
-}
-
 void playNokiaRingtone()
 {
   int tempo = 180;
@@ -407,6 +288,7 @@ void playNokiaRingtone()
     }
 
     toneDAC(melody[thisNote], noteDuration * 0.9);
+    delay(noteDuration * 0.1);
   }
 }
 
@@ -496,9 +378,7 @@ void loop()
       }
       else if (strcmp(cmd, "P") == 0)
       {
-        // playNokiaRingtone();
-        // playHappyBirthday();
-        imperialmarch();
+        playNokiaRingtone();
       }
       else
       {
