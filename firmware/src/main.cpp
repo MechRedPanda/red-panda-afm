@@ -4,6 +4,9 @@
 #include <SerialTransfer.h>
 #include <CmdParser.hpp>
 #include <CmdBuffer.hpp>
+#include <WiFi.h>
+#include <pb_encode.h>
+#include <pb_decode.h>
 
 // Define pin connections
 #define DIR_PIN 27

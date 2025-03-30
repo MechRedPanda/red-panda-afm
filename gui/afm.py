@@ -26,6 +26,15 @@ class AFM:
         self.scan_in_progress = False  # Flag to track scan progress
         self.scan_data_queue = queue.Queue()  # Thread-safe queue for scan data
 
+    def get_list_ports(self):
+        """Get a list of available serial ports."""
+        try:
+            ports = serial.tools.list_ports.comports()
+            return [port.device for port in ports]
+        except Exception as e:
+            print(f"Error retrieving serial ports: {e}")
+            return []
+
     def connect(self, port, baud_rate=115200):
         """Connect to the AFM device using a serial connection."""
         self.port = port
@@ -36,6 +45,14 @@ class AFM:
         except serial.SerialException as e:
             print(f"Error opening serial port: {e}")
             self.simulating = True
+
+    def close(self):
+        """Close the serial connection."""
+        if self.serial_connection and self.serial_connection.is_open:
+            self.serial_connection.close()
+            print("Serial connection closed.")
+        else:
+            print("No open serial connection to close.")
 
     def send_command(self, command):
         """Send a command to the AFM device."""
@@ -133,3 +150,62 @@ class AFM:
             self.scan_in_progress = False
             self.scan_thread.join()
             print("Scan stopped.")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    def main():
+        afm = AFM()
+
+        parser = argparse.ArgumentParser(
+            description="AFM Command-Line Interface")
+        parser.add_argument("--list-ports", action="store_true",
+                            help="List available serial ports")
+        parser.add_argument(
+            "--connect", nargs=2, metavar=("PORT", "BAUD"), help="Connect to AFM device")
+        parser.add_argument("--send-command", metavar="COMMAND",
+                            help="Send a command to the AFM device")
+        parser.add_argument(
+            "--read-adc", action="store_true", help="Read ADC value")
+        parser.add_argument("--set-dac", nargs=2,
+                            metavar=("CHANNEL", "VALUE"), help="Set DAC value")
+        parser.add_argument("--reset", action="store_true",
+                            help="Reset the AFM device")
+        parser.add_argument("--start-scan", nargs=3,
+                            metavar=("START", "END", "POINTS"), help="Start a scan")
+        parser.add_argument(
+            "--stop-scan", action="store_true", help="Stop the scan")
+
+        args = parser.parse_args()
+
+        if args.list_ports:
+            ports = afm.get_list_ports()
+            print("Available serial ports:", ports)
+
+        if args.connect:
+            port, baud_rate = args.connect
+            afm.connect(port, int(baud_rate))
+
+        if args.send_command:
+            afm.send_command(args.send_command)
+
+        if args.read_adc:
+            adc_value = afm.read_adc()
+            print("ADC Value:", adc_value)
+
+        if args.set_dac:
+            channel, value = args.set_dac
+            afm.set_dac(channel, int(value))
+
+        if args.reset:
+            afm.reset()
+
+        if args.start_scan:
+            start, end, points = map(int, args.start_scan)
+            afm.start_scan(start, end, points)
+            print("Scan started. Use --stop-scan to stop it.")
+
+        if args.stop_scan:
+            afm.stop_scan()
+    main()
