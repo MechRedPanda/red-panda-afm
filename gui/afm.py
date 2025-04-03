@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 import serial.tools.list_ports
 import queue
+import socket
+import struct
 
 
 @dataclass
