@@ -76,6 +76,7 @@ String getAFMStateAsJson()
   JsonDocument doc;
 
   // Fill the JSON document with AFM state data
+  doc["data_type"] = "update";
   doc["dac_f"] = current_afm_state.dac_f_val;
   doc["dac_t"] = current_afm_state.dac_t_val;
   doc["dac_x"] = current_afm_state.dac_x_val;
@@ -151,6 +152,21 @@ String processCommand(const String &jsonCommand)
       dac_f.write(value);
       response["status"] = "success";
     }
+    else if (strcmp(channel, "X") == 0)
+    {
+      dac_x.write(value);
+      response["status"] = "success";
+    }
+    else if (strcmp(channel, "Y") == 0)
+    {
+      dac_y.write(value);
+      response["status"] = "success";
+    }
+    else if (strcmp(channel, "Z") == 0)
+    {
+      dac_z.write(value);
+      response["status"] = "success";
+    }
     else
     {
       response["status"] = "error";
@@ -171,7 +187,7 @@ String processCommand(const String &jsonCommand)
 TaskHandle_t PIDTaskHandle;
 
 // Your PID control function
-void runPIDControl(void *parameter)
+void runControl(void *parameter)
 {
   const TickType_t xMaxBlockTime = pdMS_TO_TICKS(1); // 1 ms to allow FreeRTOS scheduling
 
@@ -224,7 +240,7 @@ void setup()
   Serial.println(WiFi.localIP());
 
   xTaskCreatePinnedToCore(
-      runPIDControl,            // Function to run
+      runControl,               // Function to run
       "PIDTask",                // Task name
       4096,                     // Stack size
       NULL,                     // Task parameter

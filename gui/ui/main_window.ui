@@ -54,6 +54,12 @@
      <property name="text">
       <string>Connected</string>
      </property>
+     <property name="checkable">
+      <bool>true</bool>
+     </property>
+     <property name="checked">
+      <bool>false</bool>
+     </property>
     </widget>
     <widget class="QLabel" name="ip_label">
      <property name="geometry">
@@ -146,7 +152,7 @@
       <x>50</x>
       <y>180</y>
       <width>261</width>
-      <height>141</height>
+      <height>341</height>
      </rect>
     </property>
     <property name="frameShape">
@@ -222,6 +228,45 @@
       </item>
      </layout>
     </widget>
+    <widget class="QWidget" name="horizontalLayoutWidget">
+     <property name="geometry">
+      <rect>
+       <x>10</x>
+       <y>120</y>
+       <width>241</width>
+       <height>51</height>
+      </rect>
+     </property>
+     <layout class="QHBoxLayout" name="horizontalLayout">
+      <item>
+       <widget class="QPushButton" name="dac_lock_button">
+        <property name="text">
+         <string>Lock DAC Control</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QRadioButton" name="dac_lock_status">
+        <property name="text">
+         <string>DAC_Locked</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+    <widget class="QPushButton" name="focus_widget_button">
+     <property name="geometry">
+      <rect>
+       <x>10</x>
+       <y>220</y>
+       <width>75</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Focus</string>
+     </property>
+    </widget>
    </widget>
    <widget class="QWidget" name="verticalLayoutWidget">
     <property name="geometry">
@@ -229,15 +274,15 @@
       <x>330</x>
       <y>30</y>
       <width>831</width>
-      <height>401</height>
+      <height>741</height>
      </rect>
     </property>
     <layout class="QVBoxLayout" name="verticalLayout_2">
      <item>
-      <widget class="PlotWidget" name="plot_widget_1" native="true"/>
+      <widget class="PlotWidget" name="adc_0_plot_widget" native="true"/>
      </item>
      <item>
-      <widget class="PlotWidget" name="plot_widget_0" native="true"/>
+      <widget class="PlotWidget" name="adc_1_plot_widget" native="true"/>
      </item>
     </layout>
    </widget>
