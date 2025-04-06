@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1920</width>
-    <height>1080</height>
+    <width>1216</width>
+    <height>1052</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -17,9 +17,9 @@
    <widget class="QFrame" name="frame">
     <property name="geometry">
      <rect>
-      <x>50</x>
+      <x>30</x>
       <y>30</y>
-      <width>261</width>
+      <width>231</width>
       <height>141</height>
      </rect>
     </property>
@@ -146,128 +146,6 @@
      </property>
     </widget>
    </widget>
-   <widget class="QFrame" name="frame_2">
-    <property name="geometry">
-     <rect>
-      <x>50</x>
-      <y>180</y>
-      <width>261</width>
-      <height>341</height>
-     </rect>
-    </property>
-    <property name="frameShape">
-     <enum>QFrame::StyledPanel</enum>
-    </property>
-    <property name="frameShadow">
-     <enum>QFrame::Raised</enum>
-    </property>
-    <widget class="QWidget" name="gridLayoutWidget_2">
-     <property name="geometry">
-      <rect>
-       <x>10</x>
-       <y>30</y>
-       <width>241</width>
-       <height>81</height>
-      </rect>
-     </property>
-     <layout class="QGridLayout" name="gridLayout_2" columnstretch="1,2,6" columnminimumwidth="1,2,6">
-      <item row="1" column="0">
-       <widget class="QLabel" name="label_2">
-        <property name="text">
-         <string>T</string>
-        </property>
-        <property name="alignment">
-         <set>Qt::AlignCenter</set>
-        </property>
-       </widget>
-      </item>
-      <item row="0" column="0">
-       <widget class="QLabel" name="label">
-        <property name="text">
-         <string>F</string>
-        </property>
-        <property name="alignment">
-         <set>Qt::AlignCenter</set>
-        </property>
-       </widget>
-      </item>
-      <item row="0" column="1">
-       <widget class="QLineEdit" name="F_value"/>
-      </item>
-      <item row="1" column="1">
-       <widget class="QLineEdit" name="T_value"/>
-      </item>
-      <item row="1" column="2">
-       <widget class="QSlider" name="T_slider">
-        <property name="maximum">
-         <number>65535</number>
-        </property>
-        <property name="value">
-         <number>32768</number>
-        </property>
-        <property name="orientation">
-         <enum>Qt::Horizontal</enum>
-        </property>
-       </widget>
-      </item>
-      <item row="0" column="2">
-       <widget class="QSlider" name="F_slider">
-        <property name="maximum">
-         <number>65535</number>
-        </property>
-        <property name="value">
-         <number>32768</number>
-        </property>
-        <property name="sliderPosition">
-         <number>32768</number>
-        </property>
-        <property name="orientation">
-         <enum>Qt::Horizontal</enum>
-        </property>
-       </widget>
-      </item>
-     </layout>
-    </widget>
-    <widget class="QWidget" name="horizontalLayoutWidget">
-     <property name="geometry">
-      <rect>
-       <x>10</x>
-       <y>120</y>
-       <width>241</width>
-       <height>51</height>
-      </rect>
-     </property>
-     <layout class="QHBoxLayout" name="horizontalLayout">
-      <item>
-       <widget class="QPushButton" name="dac_lock_button">
-        <property name="text">
-         <string>Lock DAC Control</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QRadioButton" name="dac_lock_status">
-        <property name="text">
-         <string>DAC_Locked</string>
-        </property>
-       </widget>
-      </item>
-     </layout>
-    </widget>
-    <widget class="QPushButton" name="focus_widget_button">
-     <property name="geometry">
-      <rect>
-       <x>10</x>
-       <y>220</y>
-       <width>75</width>
-       <height>23</height>
-      </rect>
-     </property>
-     <property name="text">
-      <string>Focus</string>
-     </property>
-    </widget>
-   </widget>
    <widget class="QWidget" name="verticalLayoutWidget">
     <property name="geometry">
      <rect>
@@ -279,12 +157,218 @@
     </property>
     <layout class="QVBoxLayout" name="verticalLayout_2">
      <item>
-      <widget class="PlotWidget" name="adc_0_plot_widget" native="true"/>
+      <widget class="PlotWidget" name="adc_plot_widget" native="true"/>
      </item>
      <item>
-      <widget class="PlotWidget" name="adc_1_plot_widget" native="true"/>
+      <widget class="PlotWidget" name="dac_plot_widget" native="true"/>
      </item>
     </layout>
+   </widget>
+   <widget class="QWidget" name="gridLayoutWidget_2">
+    <property name="geometry">
+     <rect>
+      <x>40</x>
+      <y>790</y>
+      <width>1121</width>
+      <height>161</height>
+     </rect>
+    </property>
+    <layout class="QGridLayout" name="gridLayout_2" columnstretch="1,2,1,12,0">
+     <item row="1" column="3">
+      <widget class="QSlider" name="t_slider">
+       <property name="maximum">
+        <number>65535</number>
+       </property>
+       <property name="value">
+        <number>32768</number>
+       </property>
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QLineEdit" name="t_input_box"/>
+     </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="label_2">
+       <property name="text">
+        <string>T</string>
+       </property>
+       <property name="alignment">
+        <set>Qt::AlignCenter</set>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="0">
+      <widget class="QLabel" name="label">
+       <property name="text">
+        <string>F</string>
+       </property>
+       <property name="alignment">
+        <set>Qt::AlignCenter</set>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QLineEdit" name="f_input_box"/>
+     </item>
+     <item row="1" column="2">
+      <widget class="QPushButton" name="t_set_button">
+       <property name="text">
+        <string>Set T</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="0">
+      <widget class="QLabel" name="label_4">
+       <property name="text">
+        <string>Y</string>
+       </property>
+       <property name="alignment">
+        <set>Qt::AlignCenter</set>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="3">
+      <widget class="QSlider" name="f_slider">
+       <property name="maximum">
+        <number>65535</number>
+       </property>
+       <property name="value">
+        <number>32768</number>
+       </property>
+       <property name="sliderPosition">
+        <number>32768</number>
+       </property>
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="2">
+      <widget class="QPushButton" name="f_set_button">
+       <property name="text">
+        <string>Set F</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="0">
+      <widget class="QLabel" name="label_3">
+       <property name="text">
+        <string>X</string>
+       </property>
+       <property name="alignment">
+        <set>Qt::AlignCenter</set>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="0">
+      <widget class="QLabel" name="label_5">
+       <property name="text">
+        <string>Z</string>
+       </property>
+       <property name="alignment">
+        <set>Qt::AlignCenter</set>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1">
+      <widget class="QLineEdit" name="x_input_box"/>
+     </item>
+     <item row="3" column="1">
+      <widget class="QLineEdit" name="y_input_box"/>
+     </item>
+     <item row="4" column="1">
+      <widget class="QLineEdit" name="z_input_box"/>
+     </item>
+     <item row="2" column="2">
+      <widget class="QPushButton" name="x_set_button">
+       <property name="text">
+        <string>Set X</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="2">
+      <widget class="QPushButton" name="y_set_button">
+       <property name="text">
+        <string>Set Y</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="2">
+      <widget class="QPushButton" name="z_set_button">
+       <property name="text">
+        <string>Set Z</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="3">
+      <widget class="QSlider" name="x_slider">
+       <property name="maximum">
+        <number>65535</number>
+       </property>
+       <property name="value">
+        <number>32768</number>
+       </property>
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="3">
+      <widget class="QSlider" name="y_slider">
+       <property name="maximum">
+        <number>65535</number>
+       </property>
+       <property name="value">
+        <number>32768</number>
+       </property>
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="3">
+      <widget class="QSlider" name="z_slider">
+       <property name="maximum">
+        <number>65535</number>
+       </property>
+       <property name="value">
+        <number>32768</number>
+       </property>
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </widget>
+   <widget class="QPushButton" name="focus_widget_button">
+    <property name="geometry">
+     <rect>
+      <x>50</x>
+      <y>220</y>
+      <width>131</width>
+      <height>23</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Open Focus Pane</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="scan_widget_button">
+    <property name="geometry">
+     <rect>
+      <x>50</x>
+      <y>250</y>
+      <width>131</width>
+      <height>23</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Open Scan Pane</string>
+    </property>
    </widget>
   </widget>
   <widget class="QMenuBar" name="menubar">
@@ -292,7 +376,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1920</width>
+     <width>1216</width>
      <height>22</height>
     </rect>
    </property>

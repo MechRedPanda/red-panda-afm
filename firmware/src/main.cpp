@@ -34,6 +34,14 @@ ADC_ads868x adc_1 = ADC_ads868x(&opu_spi, 1, 5);
 
 WiFiServer server(PORT); // Match the port in Python code
 
+enum State
+{
+  IDLE = 0,
+  FOCUSING = 1,
+  APPROACHING = 2,
+  SCANNING = 3,
+};
+
 struct AFM_State
 {
   uint16_t dac_f_val = 0;
@@ -45,8 +53,9 @@ struct AFM_State
   uint16_t adc_1_val = 0;
   int32_t stepper_position_0 = 0;
   int32_t timestamp = 0;
+  enum State current_state = IDLE;
 };
-
+AFM_State current_afm_state;
 void handleReset()
 {
   dac_f.reset();
@@ -56,12 +65,17 @@ void handleReset()
   dac_z.reset();
   adc_0.reset();
   adc_1.reset();
+  current_afm_state.dac_f_val = 0;
+  current_afm_state.dac_t_val = 0;
+  current_afm_state.dac_x_val = 0;
+  current_afm_state.dac_y_val = 0;
+  current_afm_state.dac_z_val = 0;
+  current_afm_state.current_state = IDLE;
   Serial.println("Reset complete");
 }
 
-AFM_State current_afm_state;
 unsigned long lastUpdateTime = 0;
-const unsigned long updateInterval = 100; // Send state every 100ms
+const unsigned long updateInterval = 500; // Send state every 100ms
 
 void updateAFMState()
 {
@@ -70,7 +84,7 @@ void updateAFMState()
   current_afm_state.timestamp = millis();
 }
 
-String getAFMStateAsJson()
+JsonDocument getAFMStateAsJson()
 {
   // Allocate memory for JSON document
   JsonDocument doc;
@@ -86,10 +100,10 @@ String getAFMStateAsJson()
   doc["adc_1"] = current_afm_state.adc_1_val;
   doc["timestamp"] = current_afm_state.timestamp;
   doc["stepper_position_0"] = current_afm_state.stepper_position_0;
-
-  String output;
-  serializeJson(doc, output);
-  return output;
+  doc["state"] = current_afm_state.current_state == IDLE ? "IDLE" : current_afm_state.current_state == FOCUSING  ? "FOCUSING"
+                                                                : current_afm_state.current_state == APPROACHING ? "APPROACHING"
+                                                                                                                 : "SCANNING";
+  return doc;
 }
 
 String processCommand(const String &jsonCommand)
@@ -112,9 +126,9 @@ String processCommand(const String &jsonCommand)
     return output;
   }
 
-  if (!doc.containsKey("command"))
+  if (!doc["command"].is<String>())
   {
-    Serial.println("command found in JSON");
+    // Serial.println("command found in JSON");
     response["status"] = "error";
     response["message"] = "Invalid DAC channel";
     String output;
@@ -128,6 +142,10 @@ String processCommand(const String &jsonCommand)
   {
     handleReset();
     response["status"] = "success";
+  }
+  else if (strcmp(command, "get_status") == 0)
+  {
+    response = getAFMStateAsJson();
   }
   else if (strcmp(command, "read_adc") == 0)
   {
@@ -145,26 +163,31 @@ String processCommand(const String &jsonCommand)
     if (strcmp(channel, "T") == 0)
     {
       dac_t.write(value);
+      current_afm_state.dac_t_val = value; // Update the state
       response["status"] = "success";
     }
     else if (strcmp(channel, "F") == 0)
     {
       dac_f.write(value);
+      current_afm_state.dac_f_val = value; // Update the state
       response["status"] = "success";
     }
     else if (strcmp(channel, "X") == 0)
     {
       dac_x.write(value);
+      current_afm_state.dac_x_val = value; // Update the state
       response["status"] = "success";
     }
     else if (strcmp(channel, "Y") == 0)
     {
       dac_y.write(value);
+      current_afm_state.dac_y_val = value; // Update the state
       response["status"] = "success";
     }
     else if (strcmp(channel, "Z") == 0)
     {
       dac_z.write(value);
+      current_afm_state.dac_z_val = value; // Update the state
       response["status"] = "success";
     }
     else
@@ -172,6 +195,37 @@ String processCommand(const String &jsonCommand)
       response["status"] = "error";
       response["message"] = "Invalid DAC channel";
     }
+  }
+  else if (strcmp(command, "set_state") == 0)
+  {
+    const char *state = doc["state"];
+
+    if (strcmp(state, "IDLE") == 0)
+    {
+      current_afm_state.current_state = IDLE;
+    }
+    else if (strcmp(state, "FOCUSING") == 0)
+    {
+      current_afm_state.current_state = FOCUSING;
+    }
+    else if (strcmp(state, "APPROACHING") == 0)
+    {
+      current_afm_state.current_state = APPROACHING;
+    }
+    else if (strcmp(state, "SCANNING") == 0)
+    {
+      current_afm_state.current_state = SCANNING;
+    }
+    else
+    {
+      response["status"] = "error";
+      response["message"] = "Invalid state";
+      String output;
+      serializeJson(response, output);
+      return output;
+    }
+
+    response["status"] = "success";
   }
   else
   {
@@ -265,25 +319,14 @@ void loop()
         String jsonCommand = client.readStringUntil('\n');
         jsonCommand.trim();
 
-        Serial.print("Received: ");
-        Serial.println(jsonCommand);
+        // Serial.print("Received: ");
+        // Serial.println(jsonCommand);
 
         String response = processCommand(jsonCommand);
         client.println(response);
 
-        Serial.print("Sent: ");
-        Serial.println(response);
-      }
-      else
-      {
-        // Send AFM state updates periodically when idle
-        unsigned long currentTime = millis();
-        if (currentTime - lastUpdateTime >= updateInterval)
-        {
-          lastUpdateTime = currentTime;
-          Serial.print("Sent AFM state: ");
-          client.println(getAFMStateAsJson());
-        }
+        // Serial.print("Sent: ");
+        // Serial.println(response);
       }
     }
 

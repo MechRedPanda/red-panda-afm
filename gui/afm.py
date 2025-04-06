@@ -1,3 +1,4 @@
+from enum import Enum
 import socket
 import json
 import threading
@@ -11,6 +12,13 @@ ESP32_PORT = 12345
 QUEUE_MAXLEN = 10000
 
 
+class AFMState(Enum):
+    IDLE = "IDLE"
+    FOCUSING = "FOCUSING"
+    APPROACHING = "APPROACHING"
+    SCANNING = "SCANNING"
+
+
 @dataclass
 class AFMStatus:
     timestamp: datetime
@@ -22,6 +30,7 @@ class AFMStatus:
     dac_y: float
     dac_z: float
     stepper_position_0: int
+    state: AFMState = AFMState.IDLE  # Default state
 
 
 class AFM:
@@ -33,7 +42,7 @@ class AFM:
         self.status_queue = deque(maxlen=QUEUE_MAXLEN)
         self.busy = False  # AFM busy status
         self.focus_interrupted = False
-        self.focus_running = False
+        self.current_state = AFMState.IDLE  # Current state of the AFM
         self.focus_results = []  # Will hold (dac_f, adc_0, adc_1)
 
     def connect(self, host=ESP32_IP, port=ESP32_PORT):
@@ -48,68 +57,12 @@ class AFM:
 
             # Start listening for updates in a separate thread
             self.running = True
-            threading.Thread(target=self._receive_updates, daemon=True).start()
 
             return True
         except Exception as e:
             print(f"Error connecting: {e}")
             self.socket = None
             return False
-
-    def _receive_updates(self):
-        """Continuously receive AFM state updates from ESP32 and store them in a queue."""
-        buffer = ""  # Buffer to store partial JSON messages
-
-        while self.running:
-            if self.busy:  # Skip receiving updates if AFM is busy
-                continue
-
-            try:
-                data = self.socket.recv(1024)  # Receive data from socket
-                if not data:
-                    break
-
-                # Append received data to buffer
-                buffer += data.decode('utf-8')
-
-                # Process all complete JSON objects in buffer
-                while "\n" in buffer:
-                    message, buffer = buffer.split(
-                        "\n", 1)  # Extract first JSON object
-
-                    try:
-                        json_data = json.loads(message.strip())  # Parse JSON
-                        if json_data.get("data_type") != "update":
-                            # Skip if not a status message
-                            continue
-
-                        # Parse JSON data into AFMStatus dataclass
-                        status_entry = AFMStatus(
-                            timestamp=datetime.now(),
-                            adc_0=float(json_data.get("adc_0", 0.0)),
-                            adc_1=float(json_data.get("adc_1", 0.0)),
-                            dac_f=float(json_data.get("dac_f", 0.0)),
-                            dac_t=float(json_data.get("dac_t", 0.0)),
-                            dac_x=float(json_data.get("dac_x", 0.0)),
-                            dac_y=float(json_data.get("dac_y", 0.0)),
-                            dac_z=float(json_data.get("dac_z", 0.0)),
-                            stepper_position_0=int(
-                                json_data.get("stepper_position_0", 0)),
-                        )
-
-                        self.status_queue.append(status_entry)
-                        print(
-                            f"Received AFM State at {status_entry.timestamp}: {status_entry}")
-
-                    except (json.JSONDecodeError, ValueError, TypeError) as e:
-                        print(
-                            f"Error parsing JSON data: {e}, Received: {message}")
-
-            except socket.timeout:
-                pass
-            except Exception as e:
-                print(f"Receive error: {e}")
-                break
 
     def set_busy(self):
         """Set the AFM as busy, pausing updates."""
@@ -119,6 +72,7 @@ class AFM:
     def set_idle(self):
         """Set the AFM as idle, resuming updates."""
         print("AFM is now idle. Updates resumed.")
+        self.set_state(AFMState.IDLE)
         self.busy = False
 
     def send_command(self, command):
@@ -132,9 +86,93 @@ class AFM:
         except Exception as e:
             print(f"Error sending command: {e}")
 
+    def send_and_receive(self, command, timeout=1.0):
+        """
+        Send a command and wait for a response from the ESP32.
+
+        Args:
+            command: The command dictionary to send.
+            timeout: Maximum time to wait for a response (seconds).
+
+        Returns:
+            The received raw response (bytes) or None if timeout.
+        """
+        if not self.socket:
+            print("Not connected")
+            return None
+
+        try:
+            # Clear receive buffer before sending the command
+            self.socket.setblocking(False)
+            while True:
+                try:
+                    self.socket.recv(1024)  # Read any leftover data
+                except BlockingIOError:
+                    break
+
+            # Send the command
+            command_json = json.dumps(command) + "\n"
+            self.socket.sendall(command_json.encode('utf-8'))
+
+            # Wait for response, checking if a full response is received
+            self.socket.settimeout(timeout)
+            buffer = ""
+            while True:
+                try:
+                    data = self.socket.recv(1024)  # Receive data from socket
+                    if not data:
+                        break
+
+                    buffer += data.decode('utf-8')
+
+                    # If a complete message is received, parse and return it
+                    while "\n" in buffer:
+                        # Extract first complete message
+                        message, buffer = buffer.split("\n", 1)
+
+                        try:
+                            json_data = json.loads(
+                                message.strip())  # Parse JSON data
+                            return json_data if json_data else None
+                        except json.JSONDecodeError as e:
+                            print(
+                                f"Error parsing response: {e}, received: {message}")
+                            continue
+
+                except socket.timeout:
+                    print("Response timeout")
+                    break
+                except Exception as e:
+                    print(f"Error during response handling: {e}")
+                    break
+
+        except Exception as e:
+            print(f"Communication error: {e}")
+            return None
+        finally:
+            self.socket.setblocking(True)
+
+    def get_status(self):
+        response = self.send_and_receive(
+            {"command": "get_status"}, timeout=2.0)
+        print(f"Status response: {response}")
+
     def reset(self):
         """Reset the AFM device."""
-        self.send_command({"command": "reset"})
+        self.send_and_receive({"command": "reset"})
+
+    def set_dac(self, channel: str, value: float):
+        """Set the DAC value for a specific channel."""
+        if channel not in ["F", "T", "X", "Y", "Z"]:
+            raise ValueError("Invalid channel. Must be one of: F, T, X, Y, Z.")
+        self.send_and_receive(
+            {"command": "set_dac", "channel": channel, "value": value})
+
+    def set_state(self, state: AFMState):
+        """Set the AFM state."""
+        if not isinstance(state, AFMState):
+            raise ValueError("Invalid state. Must be an instance of AFMState.")
+        self.send_and_receive({"command": "set_state", "state": state.name})
 
     def close(self):
         """Close the connection."""
@@ -172,29 +210,33 @@ class AFM:
             steps = range(start, end + direction, direction * step_size)
 
             try:
+                self.set_state(AFMState.FOCUSING)
                 for dac_f_value in steps:
                     if self.focus_interrupted:
                         print("Focus sweep interrupted.")
                         break
 
-                    self.send_command(
-                        {"command": "set_dac", "channel": "F", "value": dac_f_value})
-                    time.sleep(delay)
+                    # Send command and get raw response
+                    response = self.send_and_receive(
+                        {"command": "set_dac", "channel": "F", "value": dac_f_value},
+                        timeout=0.5
+                    )
 
-                    # Get ADC values from last known status
-                    if self.status_queue:
-                        last_status = self.status_queue[-1]
-                        adc_0 = getattr(last_status, "adc_0", None)
-                        adc_1 = getattr(last_status, "adc_1", None)
-                    else:
-                        adc_0 = adc_1 = None
+                    if response is None:
+                        continue
+                    response = self.send_and_receive(
+                        {"command": "read_adc"},
+                        timeout=0.5
+                    )
+                    if response is None:
+                        continue
+                    adc_0 = int(response.get("adc_0", 0))
+                    adc_1 = int(response.get("adc_1", 0))
 
+                    # Store results with raw response
                     self.focus_results.append((dac_f_value, adc_0, adc_1))
 
-                print("Focus sweep complete.")
-
             finally:
-                self.focus_running = False
                 self.set_idle()
 
         threading.Thread(target=run_focus, daemon=True).start()
@@ -213,15 +255,6 @@ if __name__ == "__main__":
     afm = AFM()
     if afm.connect():
         while True:
-            user_input = input(
-                "Enter command (or 'exit' to quit, 'busy' to pause updates, 'idle' to resume): ")
-            if user_input.lower() == "exit":
-                break
-            elif user_input.lower() == "busy":
-                afm.set_busy()
-            elif user_input.lower() == "idle":
-                afm.set_idle()
-            else:
-                afm.send_command(user_input)
-
-        afm.close()
+            # afm.get_status()
+            print(afm.send_and_receive({"command": "read_adc"}))
+            time.sleep(1)
