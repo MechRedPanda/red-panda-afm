@@ -4,7 +4,7 @@ import pyqtgraph as pg
 
 from PyQt6.QtCore import QEvent, QObject, QTimer, Qt
 from PyQt6.QtGui import QIntValidator
-from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
 from afm import AFM
 from ui.focus_widget import Ui_FocusWidget
@@ -78,8 +78,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.connected_button.setEnabled(False)
         self.connected_button.setChecked(False)
 
+        self.refresh_button.clicked.connect(self.refresh_ports)
+
         # Connect button signals to functions
-        self.connect_button.clicked.connect(self.connect_action)
+        self.connect_button.clicked.connect(self.handle_connect)
         self.reset_button.clicked.connect(self.afm_reset)
         self.close_button.clicked.connect(self.afm_close)
 
@@ -123,6 +125,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         # Setup DAC UI
         self.setup_dac_ui()
+
+        # Setup motor UI
+        self.setup_motor_ui()
 
     def setup_dac_ui(self):
         # DAC sliders and input boxes
@@ -184,32 +189,50 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         except ValueError:
             lineedit.setText(str(slider.value()))
 
-    def send_dac_value(self, key):
-        _, lineedit = self.dac_input_pairs[key]
-        value = int(lineedit.text())
-        # Replace with real communication logic
-        print(f"[AFM] Set {key.upper()} to {value}")
-        self.afm.set_dac(key.upper(), value)
+    def refresh_ports(self):
+        current_port = self.port_list_box.currentText()
 
-    def connect_action(self):
-        """Handles the Connect button click."""
-        try:
-            # Attempt to connect to the AFM device
-            self.afm.connect(host=self.ip_box.text(),
-                             port=int(self.port_box.text()))
-            self.connected_button.setChecked(True)
-            print("Connected!")
-        except Exception as e:
-            print(f"Connection failed: {e}")
+        self.port_list_box.clear()
+        ports = self.afm.get_serial_ports()
+
+        if not ports:
+            self.port_list_box.addItem("No ports available")
+            self.port_list_box.setDisabled(True)
+        else:
+            for port in ports:
+                self.port_list_box.addItem(
+                    f"{port.device} - {port.description}")
+            self.port_list_box.setDisabled(False)
+
+            # Try to restore previous selection
+            if current_port in [self.port_list_box.itemText(i) for i in range(self.port_list_box.count())]:
+                self.port_list_box.setCurrentText(current_port)
+            elif ports:  # Select first port if none was selected
+                self.port_list_box.setCurrentIndex(0)
+
+    def handle_connect(self):
+        """Handle connect button click by calling afm.connect()"""
+        if self.port_list_box.currentIndex() == -1:
+            QMessageBox.warning(self, "No Port Selected",
+                                "Please select a port from the list.")
             return
+        port = self.afm.serial_ports[self.port_list_box.currentIndex()]
 
-    def afm_reset(self):
-        """Resets the AFM device."""
         try:
-            self.afm.reset()
-            print("AFM reset command sent.")
+            # Call the existing AFM connect method
+            success = self.afm.connect(port=port.device)
+
+            if success:
+                # Update UI on successful connection
+                self.connected_button.setChecked(True)
+                print(f"Connected to {port.device} - {port.description}")
+            else:
+                QMessageBox.warning(self, "Connection Failed",
+                                    f"Failed to connect to {port}")
+
         except Exception as e:
-            print(f"Failed to send reset command: {e}")
+            QMessageBox.critical(self, "Connection Error",
+                                 f"Error connecting to {port}:\n{str(e)}")
 
     def afm_close(self):
         """Closes the AFM connection."""
@@ -220,15 +243,83 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         except Exception as e:
             print(f"Failed to close AFM connection: {e}")
 
+    def afm_reset(self):
+        """Resets the AFM device."""
+        try:
+            self.afm.reset()
+            print("AFM reset command sent.")
+        except Exception as e:
+            print(f"Failed to send reset command: {e}")
+
+    def send_dac_value(self, key):
+        _, lineedit = self.dac_input_pairs[key]
+        value = int(lineedit.text())
+        # Replace with real communication logic
+        print(f"[AFM] Set {key.upper()} to {value}")
+        self.afm.set_dac(key.upper(), value)
+
+    def setup_motor_ui(self):
+        """Initialize motor control UI elements"""
+        # Set up input validation
+        int_validator = QIntValidator()
+        self.step_motor_1_input_box.setValidator(int_validator)
+
+        # Default values
+        self.step_motor_1_input_box.setText("100")  # Default step count
+        self.motor_running_radio_button.setChecked(False)
+
+        # Connect signals
+        self.step_motor_1_button.clicked.connect(self.start_motor_1_movement)
+        self.stop_motors_button.clicked.connect(self.stop_all_motors)
+
+    def start_motor_1_movement(self):
+        """Handle motor 1 movement start"""
+        if not self.afm.is_connected():
+            QMessageBox.warning(self, "Not Connected",
+                                "Please connect to AFM first")
+            return
+
+        try:
+            steps = int(self.step_motor_1_input_box.text())
+            if steps <= 0:
+                raise ValueError("Steps must be positive")
+
+            # Start movement (CW direction by default)
+            response = self.afm.move_motor(
+                motor=1,
+                steps=steps,
+                speed=300  # Medium speed
+            )
+
+            if response.get("status") != "started":
+                QMessageBox.warning(self, "Movement Error",
+                                    f"Failed to start motor: {response.get('message', 'Unknown error')}")
+
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid Input", str(e))
+
+    def stop_all_motors(self):
+        """Emergency stop all motors"""
+        if not self.afm.is_connected():
+            return
+
+        response = self.afm.stop_motor()
+        if response.get("status") != "stopped":
+            QMessageBox.warning(self, "Stop Error",
+                                "Failed to stop motors")
+
     def update_plot(self):
         """Update plot with the latest AFM data"""
+        if not self.afm.is_connected() or self.afm.busy:
+            return
+        print(self.afm.get_status())  # Update the AFM status
 
         if self.afm.status_queue:
             latest_data = list(self.afm.status_queue)  # Get the queue contents
 
             # Extract timestamp and adc_0 values
-            x_data = [(entry.timestamp - latest_data[0].timestamp).total_seconds()
-                      for entry in latest_data]
+            x_data = [(entry.timestamp - self.afm.status_queue[0].timestamp) /
+                      1000 for entry in latest_data]
             adc_0_data = [entry.adc_0 for entry in latest_data]
             adc_1_data = [entry.adc_1 for entry in latest_data]
             dac_x_data = [entry.dac_x for entry in latest_data]

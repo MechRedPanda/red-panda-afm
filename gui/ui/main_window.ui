@@ -20,7 +20,7 @@
       <x>30</x>
       <y>30</y>
       <width>231</width>
-      <height>141</height>
+      <height>111</height>
      </rect>
     </property>
     <property name="frameShape">
@@ -32,8 +32,8 @@
     <widget class="QPushButton" name="connect_button">
      <property name="geometry">
       <rect>
-       <x>20</x>
-       <y>110</y>
+       <x>90</x>
+       <y>70</y>
        <width>61</width>
        <height>23</height>
       </rect>
@@ -64,85 +64,53 @@
     <widget class="QLabel" name="ip_label">
      <property name="geometry">
       <rect>
-       <x>30</x>
-       <y>50</y>
+       <x>20</x>
+       <y>40</y>
        <width>31</width>
        <height>21</height>
       </rect>
      </property>
      <property name="text">
-      <string>IP</string>
+      <string>COM</string>
      </property>
      <property name="alignment">
       <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter</set>
      </property>
     </widget>
-    <widget class="QLineEdit" name="ip_box">
-     <property name="geometry">
-      <rect>
-       <x>60</x>
-       <y>50</y>
-       <width>111</width>
-       <height>20</height>
-      </rect>
-     </property>
-     <property name="text">
-      <string>192.168.86.25</string>
-     </property>
-    </widget>
-    <widget class="QLabel" name="port_label">
-     <property name="geometry">
-      <rect>
-       <x>20</x>
-       <y>80</y>
-       <width>31</width>
-       <height>21</height>
-      </rect>
-     </property>
-     <property name="text">
-      <string>Port</string>
-     </property>
-     <property name="alignment">
-      <set>Qt::AlignCenter</set>
-     </property>
-    </widget>
-    <widget class="QLineEdit" name="port_box">
-     <property name="geometry">
-      <rect>
-       <x>60</x>
-       <y>80</y>
-       <width>116</width>
-       <height>20</height>
-      </rect>
-     </property>
-     <property name="text">
-      <string>12345</string>
-     </property>
-    </widget>
-    <widget class="QPushButton" name="reset_button">
-     <property name="geometry">
-      <rect>
-       <x>160</x>
-       <y>110</y>
-       <width>61</width>
-       <height>23</height>
-      </rect>
-     </property>
-     <property name="text">
-      <string>Reset</string>
-     </property>
-    </widget>
     <widget class="QPushButton" name="close_button">
      <property name="geometry">
       <rect>
-       <x>90</x>
-       <y>110</y>
+       <x>160</x>
+       <y>70</y>
        <width>61</width>
        <height>23</height>
       </rect>
      </property>
      <property name="text">
       <string>Close</string>
+     </property>
+    </widget>
+    <widget class="QComboBox" name="port_list_box">
+     <property name="geometry">
+      <rect>
+       <x>60</x>
+       <y>40</y>
+       <width>161</width>
+       <height>22</height>
+      </rect>
+     </property>
+    </widget>
+    <widget class="QPushButton" name="refresh_button">
+     <property name="geometry">
+      <rect>
+       <x>20</x>
+       <y>70</y>
+       <width>61</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Refresh</string>
      </property>
     </widget>
    </widget>
@@ -173,7 +141,7 @@
       <height>161</height>
      </rect>
     </property>
-    <layout class="QGridLayout" name="gridLayout_2" columnstretch="1,2,1,12,0">
+    <layout class="QGridLayout" name="gridLayout_2" columnstretch="1,1,1,12">
      <item row="1" column="3">
       <widget class="QSlider" name="t_slider">
        <property name="maximum">
@@ -344,31 +312,105 @@
      </item>
     </layout>
    </widget>
-   <widget class="QPushButton" name="focus_widget_button">
+   <widget class="QWidget" name="verticalLayoutWidget_2">
     <property name="geometry">
      <rect>
-      <x>50</x>
-      <y>220</y>
-      <width>131</width>
-      <height>23</height>
+      <x>30</x>
+      <y>170</y>
+      <width>160</width>
+      <height>201</height>
      </rect>
     </property>
-    <property name="text">
-     <string>Open Focus Pane</string>
-    </property>
+    <layout class="QVBoxLayout" name="verticalLayout">
+     <item>
+      <widget class="QPushButton" name="reset_button">
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Minimum" vsizetype="Expanding">
+         <horstretch>0</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <property name="text">
+        <string>AFM Reset</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="focus_widget_button">
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Minimum" vsizetype="Expanding">
+         <horstretch>0</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <property name="text">
+        <string>Open Focus Panel</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="approach_widget_button">
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Minimum" vsizetype="Expanding">
+         <horstretch>0</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <property name="text">
+        <string>Open Approach Panel</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="scan_widget_button">
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Minimum" vsizetype="Expanding">
+         <horstretch>0</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <property name="text">
+        <string>Open Scan Panel</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
    </widget>
-   <widget class="QPushButton" name="scan_widget_button">
+   <widget class="QWidget" name="gridLayoutWidget">
     <property name="geometry">
      <rect>
-      <x>50</x>
-      <y>250</y>
-      <width>131</width>
-      <height>23</height>
+      <x>30</x>
+      <y>410</y>
+      <width>201</width>
+      <height>80</height>
      </rect>
     </property>
-    <property name="text">
-     <string>Open Scan Pane</string>
-    </property>
+    <layout class="QGridLayout" name="gridLayout">
+     <item row="0" column="0">
+      <widget class="QRadioButton" name="motor_running_radio_button">
+       <property name="text">
+        <string>Motor Running</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QPushButton" name="stop_motors_button">
+       <property name="text">
+        <string>Stop Motors</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QPushButton" name="step_motor_1_button">
+       <property name="text">
+        <string>Start Motor 1</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QLineEdit" name="step_motor_1_input_box"/>
+     </item>
+    </layout>
    </widget>
   </widget>
   <widget class="QMenuBar" name="menubar">
