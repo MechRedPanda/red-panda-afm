@@ -2,12 +2,12 @@ from enum import Enum
 import json
 import threading
 from collections import deque
-from dataclasses import dataclass
 from datetime import datetime
 import time
 import serial
 from serial.tools import list_ports
 from typing import Dict, Optional, Union
+from dataclasses import dataclass, field
 
 # Default serial port settings
 DEFAULT_PORT = None  # Will auto-detect if None
@@ -24,17 +24,31 @@ class AFMState(Enum):
 
 
 @dataclass
+class MotorStatus:
+    position: int = 0       # Current step position
+    target: int = 0         # Target position
+    is_running: bool = False  # True if motor is currently moving
+
+
+@dataclass
 class AFMStatus:
-    timestamp: int
-    adc_0: int
-    adc_1: int
-    dac_f: int
-    dac_t: int
-    dac_x: int
-    dac_y: int
-    dac_z: int
-    stepper_position_0: int
-    state: AFMState = AFMState.IDLE  # Default state
+    # Core AFM measurements
+    timestamp: int          # Timestamp in milliseconds
+    adc_0: int              # ADC channel 0 reading
+    adc_1: int              # ADC channel 1 reading
+    dac_f: int              # Feedback DAC value
+    dac_t: int              # Tuning DAC value
+    dac_x: int              # X-axis DAC value
+    dac_y: int              # Y-axis DAC value
+    dac_z: int              # Z-axis DAC value
+
+    # Motor status (position, target, running state)
+    motor_1: MotorStatus = field(default_factory=MotorStatus)  # Motor 1 status
+    motor_2: MotorStatus = field(default_factory=MotorStatus)  # Motor 2 status
+    motor_3: MotorStatus = field(default_factory=MotorStatus)  # Motor 3 status
+
+    # System state
+    state: AFMState = AFMState.IDLE
 
 
 class AFM:
@@ -175,6 +189,10 @@ class AFM:
             {"command": "get_status"}, timeout=2.0)
         if response:
             try:
+                # Safely get motor data with defaults
+                def get_motor_data(num):
+                    return response.get(f"motor_{num}", {})
+
                 status = AFMStatus(
                     timestamp=int(response.get("timestamp", 0)),
                     adc_0=int(response.get("adc_0", 0)),
@@ -184,15 +202,36 @@ class AFM:
                     dac_x=int(response.get("dac_x", 0)),
                     dac_y=int(response.get("dac_y", 0)),
                     dac_z=int(response.get("dac_z", 0)),
-                    stepper_position_0=int(
-                        response.get("stepper_position_0", 0)),
+                    motor_1=MotorStatus(
+                        position=int(get_motor_data(1).get("position", 0)),
+                        target=int(get_motor_data(1).get("target", 0)),
+                        is_running=bool(get_motor_data(
+                            1).get("is_running", False))
+                    ),
+                    motor_2=MotorStatus(
+                        position=int(get_motor_data(2).get("position", 0)),
+                        target=int(get_motor_data(2).get("target", 0)),
+                        is_running=bool(get_motor_data(
+                            2).get("is_running", False))
+                    ),
+                    motor_3=MotorStatus(
+                        position=int(get_motor_data(3).get("position", 0)),
+                        target=int(get_motor_data(3).get("target", 0)),
+                        is_running=bool(get_motor_data(
+                            3).get("is_running", False))
+                    ),
                     state=AFMState(response.get("state", "IDLE"))
                 )
+
                 self.status_queue.append(status)
                 self.current_state = status.state
+                return status
+
             except Exception as e:
-                print(f"Error creating AFMStatus: {e}")
-        return response
+                print(f"Error parsing AFM status: {e}")
+                print(f"Raw response: {response}")
+
+        return None
 
     def reset(self):
         """Reset the AFM device."""
@@ -251,21 +290,6 @@ class AFM:
             Dictionary with status
         """
         cmd = {'command': 'stop_motor'}
-        if motor in {1, 2, 3}:
-            cmd['motor'] = motor
-        return self.send_and_receive(cmd)
-
-    def get_motor_status(self, motor: Optional[int] = None) -> Dict:
-        """
-        Get motor status
-
-        Args:
-            motor: Specific motor (1-3) or None for all motors
-
-        Returns:
-            Dictionary with status information
-        """
-        cmd = {'command': 'get_motor_status'}
         if motor in {1, 2, 3}:
             cmd['motor'] = motor
         return self.send_and_receive(cmd)

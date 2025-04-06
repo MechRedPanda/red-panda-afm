@@ -259,44 +259,85 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.afm.set_dac(key.upper(), value)
 
     def setup_motor_ui(self):
-        """Initialize motor control UI elements"""
-        # Set up input validation
-        int_validator = QIntValidator()
-        self.step_motor_1_input_box.setValidator(int_validator)
+        """Initialize motor control UI elements for all three motors"""
+        # Set up input validation for all motors
+        motor_validator = QIntValidator()
+        # Custom range for all motors
+        motor_validator.setRange(-100000, 100000)
 
-        # Default values
-        self.step_motor_1_input_box.setText("100")  # Default step count
+        # Motor 1 controls
+        self.step_motor_1_input_box.setValidator(motor_validator)
+        self.step_motor_1_input_box.setText("100")
+        self.step_motor_1_button.clicked.connect(
+            lambda: self.start_motor_movement(1))
+
+        # Motor 2 controls
+        self.step_motor_2_input_box.setValidator(motor_validator)
+        self.step_motor_2_input_box.setText("100")
+        self.step_motor_2_button.clicked.connect(
+            lambda: self.start_motor_movement(2))
+
+        # Motor 3 controls
+        self.step_motor_3_input_box.setValidator(motor_validator)
+        self.step_motor_3_input_box.setText("100")
+        self.step_motor_3_button.clicked.connect(
+            lambda: self.start_motor_movement(3))
+
+        # Common controls
+        self.stop_motors_button.clicked.connect(self.stop_all_motors)
         self.motor_running_radio_button.setChecked(False)
 
-        # Connect signals
-        self.step_motor_1_button.clicked.connect(self.start_motor_1_movement)
-        self.stop_motors_button.clicked.connect(self.stop_all_motors)
+        # Status indicators
+        self.motor_status_labels = {
+            1: self.motor_1_status_label,
+            2: self.motor_2_status_label,
+            3: self.motor_3_status_label
+        }
 
-    def start_motor_1_movement(self):
-        """Handle motor 1 movement start"""
+    def start_motor_movement(self, motor_num: int):
+        """Handle motor movement start for any motor"""
         if not self.afm.is_connected():
             QMessageBox.warning(self, "Not Connected",
                                 "Please connect to AFM first")
             return
 
         try:
-            steps = int(self.step_motor_1_input_box.text())
-            if steps <= 0:
-                raise ValueError("Steps must be positive")
+            # Get the correct input box for this motor
+            input_box = getattr(self, f"step_motor_{motor_num}_input_box")
+            steps = int(input_box.text())
 
-            # Start movement (CW direction by default)
+            if steps == 0:
+                raise ValueError("Steps cannot be zero")
+
+            # Update UI feedback
+            status_label = self.motor_status_labels[motor_num]
+            status_label.setText("Starting..." if steps >
+                                 0 else "Starting (CCW)...")
+            status_label.setStyleSheet("color: orange;")
+
+            # Start movement - direction determined by step sign
             response = self.afm.move_motor(
-                motor=1,
-                steps=steps,
+                motor=motor_num,
+                steps=steps,  # Sign determines direction
                 speed=300  # Medium speed
             )
 
             if response.get("status") != "started":
+                status_label.setText("Error!")
+                status_label.setStyleSheet("color: red;")
                 QMessageBox.warning(self, "Movement Error",
-                                    f"Failed to start motor: {response.get('message', 'Unknown error')}")
+                                    f"Failed to start motor {motor_num}: {response.get('message', 'Unknown error')}")
+            else:
+                status_label.setText("Running" if steps >
+                                     0 else "Running (CCW)")
+                status_label.setStyleSheet("color: green;")
 
         except ValueError as e:
             QMessageBox.warning(self, "Invalid Input", str(e))
+            if motor_num in self.motor_status_labels:
+                self.motor_status_labels[motor_num].setText("Invalid Input")
+                self.motor_status_labels[motor_num].setStyleSheet(
+                    "color: red;")
 
     def stop_all_motors(self):
         """Emergency stop all motors"""
@@ -304,18 +345,27 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             return
 
         response = self.afm.stop_motor()
+
+        # Update all status indicators
+        for motor_num in range(1, 4):
+            if motor_num in self.motor_status_labels:
+                self.motor_status_labels[motor_num].setText("Idle")
+                self.motor_status_labels[motor_num].setStyleSheet(
+                    "color: gray;")
+
         if response.get("status") != "stopped":
-            QMessageBox.warning(self, "Stop Error",
-                                "Failed to stop motors")
+            QMessageBox.warning(self, "Stop Error", "Failed to stop motors")
 
     def update_plot(self):
         """Update plot with the latest AFM data"""
         if not self.afm.is_connected() or self.afm.busy:
             return
-        print(self.afm.get_status())  # Update the AFM status
+        self.afm.get_status()  # Update the AFM status
 
         if self.afm.status_queue:
             latest_data = list(self.afm.status_queue)  # Get the queue contents
+            self.motor_running_radio_button.setChecked(
+                latest_data[-1].motor_1.is_running)
 
             # Extract timestamp and adc_0 values
             x_data = [(entry.timestamp - self.afm.status_queue[0].timestamp) /

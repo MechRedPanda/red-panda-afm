@@ -381,8 +381,8 @@
      <rect>
       <x>30</x>
       <y>410</y>
-      <width>201</width>
-      <height>80</height>
+      <width>231</width>
+      <height>112</height>
      </rect>
     </property>
     <layout class="QGridLayout" name="gridLayout">
@@ -393,12 +393,8 @@
        </property>
       </widget>
      </item>
-     <item row="0" column="1">
-      <widget class="QPushButton" name="stop_motors_button">
-       <property name="text">
-        <string>Stop Motors</string>
-       </property>
-      </widget>
+     <item row="1" column="1">
+      <widget class="QLineEdit" name="step_motor_1_input_box"/>
      </item>
      <item row="1" column="0">
       <widget class="QPushButton" name="step_motor_1_button">
@@ -407,8 +403,53 @@
        </property>
       </widget>
      </item>
-     <item row="1" column="1">
-      <widget class="QLineEdit" name="step_motor_1_input_box"/>
+     <item row="0" column="1">
+      <widget class="QPushButton" name="stop_motors_button">
+       <property name="text">
+        <string>Stop Motors</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="2">
+      <widget class="QLabel" name="motor_1_status_label">
+       <property name="text">
+        <string>TextLabel</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="0">
+      <widget class="QPushButton" name="step_motor_2_button">
+       <property name="text">
+        <string>Start Motor 1</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="0">
+      <widget class="QPushButton" name="step_motor_3_button">
+       <property name="text">
+        <string>Start Motor 1</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1">
+      <widget class="QLineEdit" name="step_motor_2_input_box"/>
+     </item>
+     <item row="3" column="1">
+      <widget class="QLineEdit" name="step_motor_3_input_box"/>
+     </item>
+     <item row="2" column="2">
+      <widget class="QLabel" name="motor_2_status_label">
+       <property name="text">
+        <string>TextLabel</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="2">
+      <widget class="QLabel" name="motor_3_status_label">
+       <property name="text">
+        <string>TextLabel</string>
+       </property>
+      </widget>
      </item>
     </layout>
    </widget>

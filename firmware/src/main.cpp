@@ -264,22 +264,37 @@ JsonDocument getAFMStateAsJson()
   // Allocate memory for JSON document
   JsonDocument doc;
 
-  // Fill the JSON document with AFM state data
+  // Core AFM measurements
   doc["data_type"] = "update";
+  doc["timestamp"] = current_afm_state.timestamp;
+  doc["adc_0"] = current_afm_state.adc_0_val;
+  doc["adc_1"] = current_afm_state.adc_1_val;
   doc["dac_f"] = current_afm_state.dac_f_val;
   doc["dac_t"] = current_afm_state.dac_t_val;
   doc["dac_x"] = current_afm_state.dac_x_val;
   doc["dac_y"] = current_afm_state.dac_y_val;
   doc["dac_z"] = current_afm_state.dac_z_val;
-  doc["adc_0"] = current_afm_state.adc_0_val;
-  doc["adc_1"] = current_afm_state.adc_1_val;
-  doc["timestamp"] = current_afm_state.timestamp;
-  doc["state"] = current_afm_state.current_state == IDLE ? "IDLE" : current_afm_state.current_state == FOCUSING ? "FOCUSING"
-                                                                                                                : "SCANNING";
-  doc["motor_1"]["current_position"] = current_afm_state.motors[0].current_position;
-  doc["motor_1"]["target_position"] = current_afm_state.motors[0].target_position;
-  doc["motor_1"]["status"] = current_afm_state.motors[0].status == MOTOR_IDLE ? "IDLE" : current_afm_state.motors[0].status == MOTOR_MOVING ? "MOVING"
-                                                                                                                                            : "ERROR";
+
+  // System state
+  doc["state"] = current_afm_state.current_state == IDLE ? "IDLE" : current_afm_state.current_state == FOCUSING  ? "FOCUSING"
+                                                                : current_afm_state.current_state == APPROACHING ? "APPROACHING"
+                                                                                                                 : "SCANNING";
+
+  // Motor status (all three motors)
+  JsonObject motor1 = doc["motor_1"].to<JsonObject>();
+  motor1["position"] = current_afm_state.motors[0].current_position;
+  motor1["target"] = current_afm_state.motors[0].target_position;
+  motor1["is_running"] = current_afm_state.motors[0].status == MOTOR_MOVING;
+
+  JsonObject motor2 = doc["motor_2"].to<JsonObject>();
+  motor2["position"] = current_afm_state.motors[1].current_position;
+  motor2["target"] = current_afm_state.motors[1].target_position;
+  motor2["is_running"] = current_afm_state.motors[1].status == MOTOR_MOVING;
+
+  JsonObject motor3 = doc["motor_3"].to<JsonObject>();
+  motor3["position"] = current_afm_state.motors[2].current_position;
+  motor3["target"] = current_afm_state.motors[2].target_position;
+  motor3["is_running"] = current_afm_state.motors[2].status == MOTOR_MOVING;
   return doc;
 }
 
