@@ -86,6 +86,7 @@ struct AFM_State
   uint32_t pid_last_time = 0;
   float pid_slew_rate = 1000.0; // Maximum change per second
   float pid_last_output = 0;
+  float pid_bias = 0; // Initial bias value
 };
 
 AFM_State current_afm_state;
@@ -413,8 +414,9 @@ void updatePIDControl() {
   current_afm_state.pid_integral += current_afm_state.pid_ki * error * dt / 1000.0;
   float d_term = current_afm_state.pid_kd * (error - current_afm_state.pid_last_error) / (dt / 1000.0);
 
-  // Calculate desired output
-  float desired_output = p_term + current_afm_state.pid_integral + d_term;
+  // Calculate desired output with bias
+  float pid_output = p_term + current_afm_state.pid_integral + d_term;
+  float desired_output = pid_output + current_afm_state.pid_bias;
 
   // Apply slew rate limiting
   float max_change = current_afm_state.pid_slew_rate * dt / 1000.0; // Convert to per millisecond
@@ -765,6 +767,7 @@ String processCommand(const String &jsonCommand)
       current_afm_state.pid_integral = 0;
       current_afm_state.pid_last_error = 0;
       current_afm_state.pid_last_output = current_afm_state.dac_z_val;
+      current_afm_state.pid_bias = current_afm_state.dac_z_val; // Set bias to current DAC value
       response["status"] = "success";
       response["message"] = "PID control enabled";
     }
@@ -781,6 +784,7 @@ String processCommand(const String &jsonCommand)
       current_afm_state.pid_kd = doc["kd"] | current_afm_state.pid_kd;
       current_afm_state.pid_invert = doc["invert"] | current_afm_state.pid_invert;
       current_afm_state.pid_slew_rate = doc["slew_rate"] | current_afm_state.pid_slew_rate;
+      current_afm_state.pid_bias = doc["bias"] | current_afm_state.pid_bias;
       response["status"] = "success";
       response["message"] = "PID parameters updated";
     }
@@ -793,6 +797,7 @@ String processCommand(const String &jsonCommand)
       response["kd"] = current_afm_state.pid_kd;
       response["invert"] = current_afm_state.pid_invert;
       response["slew_rate"] = current_afm_state.pid_slew_rate;
+      response["bias"] = current_afm_state.pid_bias;
       response["current_value"] = current_afm_state.adc_0_val;
       response["output"] = current_afm_state.dac_z_val;
       response["status"] = "success";

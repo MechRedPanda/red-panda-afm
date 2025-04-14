@@ -390,12 +390,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.target_adc_value_input.setText(str(target))
 
             # Apply parameters
-            self.afm.set_pid_parameters(
-                kp=kp, ki=ki, kd=kd, invert=pid_reverse)
+            print(f"Applying PID parameters: kp={kp}, ki={ki}, kd={kd}, invert={pid_reverse}")
+            print(self.afm.set_pid_parameters(
+                kp=kp, ki=ki, kd=kd, invert=pid_reverse))
 
             # If PID is enabled, re-enable it with new parameters
             if self.pid_toggle_button.isChecked():
-                self.afm.enable_pid(target=target)
+                print(f"Enabling PID with target={target}")
+                print(self.afm.enable_pid(target=target))
 
         except ValueError:
             QMessageBox.warning(self, "Invalid Input",
@@ -406,7 +408,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def update_pid_status(self):
         """Update PID status display"""
-        if not self.afm.is_connected():
+        if not self.afm.is_connected() or self.afm.is_busy:
             return
 
         try:
