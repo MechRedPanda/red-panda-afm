@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1216</width>
-    <height>1052</height>
+    <width>1193</width>
+    <height>778</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -120,7 +120,7 @@
       <x>330</x>
       <y>30</y>
       <width>831</width>
-      <height>741</height>
+      <height>521</height>
      </rect>
     </property>
     <layout class="QVBoxLayout" name="verticalLayout_2">
@@ -135,9 +135,9 @@
    <widget class="QWidget" name="gridLayoutWidget_2">
     <property name="geometry">
      <rect>
-      <x>40</x>
-      <y>790</y>
-      <width>1121</width>
+      <x>30</x>
+      <y>570</y>
+      <width>1131</width>
       <height>161</height>
      </rect>
     </property>
@@ -315,10 +315,10 @@
    <widget class="QWidget" name="verticalLayoutWidget_2">
     <property name="geometry">
      <rect>
-      <x>30</x>
-      <y>170</y>
+      <x>40</x>
+      <y>160</y>
       <width>160</width>
-      <height>201</height>
+      <height>141</height>
      </rect>
     </property>
     <layout class="QVBoxLayout" name="verticalLayout">
@@ -332,6 +332,19 @@
        </property>
        <property name="text">
         <string>AFM Reset</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="restore_button">
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Minimum" vsizetype="Expanding">
+         <horstretch>0</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <property name="text">
+        <string>AFM Restore</string>
        </property>
       </widget>
      </item>
@@ -380,21 +393,18 @@
     <property name="geometry">
      <rect>
       <x>30</x>
-      <y>410</y>
-      <width>231</width>
-      <height>112</height>
+      <y>330</y>
+      <width>271</width>
+      <height>141</height>
      </rect>
     </property>
-    <layout class="QGridLayout" name="gridLayout">
-     <item row="0" column="0">
-      <widget class="QRadioButton" name="motor_running_radio_button">
+    <layout class="QGridLayout" name="gridLayout" columnstretch="2,2,3">
+     <item row="1" column="2">
+      <widget class="QLabel" name="motor_1_status_label">
        <property name="text">
-        <string>Motor Running</string>
+        <string>TextLabel</string>
        </property>
       </widget>
-     </item>
-     <item row="1" column="1">
-      <widget class="QLineEdit" name="step_motor_1_input_box"/>
      </item>
      <item row="1" column="0">
       <widget class="QPushButton" name="step_motor_1_button">
@@ -410,24 +420,27 @@
        </property>
       </widget>
      </item>
-     <item row="1" column="2">
-      <widget class="QLabel" name="motor_1_status_label">
-       <property name="text">
-        <string>TextLabel</string>
-       </property>
-      </widget>
-     </item>
      <item row="2" column="0">
       <widget class="QPushButton" name="step_motor_2_button">
        <property name="text">
-        <string>Start Motor 1</string>
+        <string>Start Motor 2</string>
        </property>
       </widget>
      </item>
-     <item row="3" column="0">
-      <widget class="QPushButton" name="step_motor_3_button">
+     <item row="0" column="0">
+      <widget class="QRadioButton" name="motor_running_radio_button">
        <property name="text">
-        <string>Start Motor 1</string>
+        <string>Motor Running</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QLineEdit" name="step_motor_1_input_box"/>
+     </item>
+     <item row="2" column="2">
+      <widget class="QLabel" name="motor_2_status_label">
+       <property name="text">
+        <string>TextLabel</string>
        </property>
       </widget>
      </item>
@@ -437,13 +450,6 @@
      <item row="3" column="1">
       <widget class="QLineEdit" name="step_motor_3_input_box"/>
      </item>
-     <item row="2" column="2">
-      <widget class="QLabel" name="motor_2_status_label">
-       <property name="text">
-        <string>TextLabel</string>
-       </property>
-      </widget>
-     </item>
      <item row="3" column="2">
       <widget class="QLabel" name="motor_3_status_label">
        <property name="text">
@@ -451,7 +457,41 @@
        </property>
       </widget>
      </item>
+     <item row="3" column="0">
+      <widget class="QPushButton" name="step_motor_3_button">
+       <property name="text">
+        <string>Start Motor 3</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="0">
+      <widget class="QPushButton" name="motor_set_fast_button">
+       <property name="text">
+        <string>Fast</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="2">
+      <widget class="QPushButton" name="motor_set_slow_button">
+       <property name="text">
+        <string>Slow</string>
+       </property>
+      </widget>
+     </item>
     </layout>
+   </widget>
+   <widget class="QCheckBox" name="update_toggle">
+    <property name="geometry">
+     <rect>
+      <x>30</x>
+      <y>520</y>
+      <width>291</width>
+      <height>31</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>update_toggle</string>
+    </property>
    </widget>
   </widget>
   <widget class="QMenuBar" name="menubar">
@@ -459,7 +499,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1216</width>
+     <width>1193</width>
      <height>22</height>
     </rect>
    </property>

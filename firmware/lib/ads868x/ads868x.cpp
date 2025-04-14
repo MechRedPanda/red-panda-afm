@@ -6,7 +6,10 @@
   Initialize the object to be used.
   Create a buffer of size buffer_size, and select the pin connected to cs.
 */
-ADC_ads868x::ADC_ads868x(SPIClass *spi, uint8_t buffer_size, u_int8_t cs_pin): _cs_pin(cs_pin), spi(spi)
+ADC_ads868x::ADC_ads868x(SPIClass *spi, uint8_t buffer_size, u_int8_t cs_pin, uint16_t range_sel): 
+  _cs_pin(cs_pin), 
+  spi(spi),
+  _range_sel(range_sel)
 {
   uint32_t receive_buffer[buffer_size];
   _receive_buffer = receive_buffer;
@@ -85,5 +88,5 @@ uint16_t ADC_ads868x::readADC(void){
 }
 
 void ADC_ads868x::reset(void){
-  transmit(ADS8689_WRITE_FULL, ADS8689_RANGE_SEL_REG, 0x0004);
+  transmit(ADS8689_WRITE_FULL, ADS8689_RANGE_SEL_REG, _range_sel);
 }

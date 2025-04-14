@@ -32,7 +32,7 @@
 class ADC_ads868x
 {
   public:
-    ADC_ads868x(SPIClass *spi, uint8_t buffer_size, uint8_t cs_pin);
+    ADC_ads868x(SPIClass *spi, uint8_t buffer_size, uint8_t cs_pin, uint16_t range_sel = 0x0004);
     void transmit(uint8_t command,uint16_t address, uint16_t data);
     uint32_t readBuffer(void);
     uint8_t inputAvailable(void);
@@ -48,6 +48,7 @@ class ADC_ads868x
     uint8_t _buffer_store_num;
     uint32_t _tmp;
     uint8_t _transmit_bytes[4];
+    uint16_t _range_sel;
 };
 
 #endif

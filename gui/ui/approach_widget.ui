@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
- <class>FocusWidget</class>
- <widget class="QWidget" name="FocusWidget">
+ <class>ApproachWidget</class>
+ <widget class="QWidget" name="ApproachWidget">
   <property name="geometry">
    <rect>
     <x>0</x>
@@ -13,61 +13,88 @@
   <property name="windowTitle">
    <string>Form</string>
   </property>
-  <widget class="PlotWidget" name="focus_plot_widget" native="true">
+  <widget class="PlotWidget" name="approach_plot_widget" native="true">
    <property name="geometry">
     <rect>
      <x>20</x>
      <y>30</y>
      <width>751</width>
-     <height>321</height>
+     <height>421</height>
     </rect>
    </property>
   </widget>
   <widget class="QWidget" name="gridLayoutWidget">
    <property name="geometry">
     <rect>
-     <x>130</x>
-     <y>380</y>
-     <width>261</width>
+     <x>150</x>
+     <y>470</y>
+     <width>391</width>
      <height>80</height>
     </rect>
    </property>
-   <layout class="QGridLayout" name="gridLayout" columnstretch="2,3">
-    <item row="1" column="0">
-     <widget class="QLabel" name="label_2">
+   <layout class="QGridLayout" name="gridLayout" columnstretch="2,2,2,2">
+    <item row="0" column="0">
+     <widget class="QLabel" name="label">
       <property name="text">
-       <string>Max ADC Change</string>
+       <string>ADC Channel</string>
       </property>
      </widget>
     </item>
+    <item row="1" column="3">
+     <widget class="QLineEdit" name="step_size"/>
+    </item>
+    <item row="1" column="2">
+     <widget class="QLabel" name="label_4">
+      <property name="text">
+       <string>StepSize</string>
+      </property>
+     </widget>
+    </item>
+    <item row="0" column="2">
+     <widget class="QLabel" name="label_5">
+      <property name="text">
+       <string>MotorNumber</string>
+      </property>
+     </widget>
+    </item>
+    <item row="2" column="2">
+     <widget class="QLabel" name="label_6">
+      <property name="text">
+       <string>MaxSteps</string>
+      </property>
+     </widget>
+    </item>
+    <item row="2" column="3">
+     <widget class="QLineEdit" name="max_steps"/>
+    </item>
     <item row="1" column="1">
-     <widget class="QLineEdit" name="f_end">
+     <widget class="QLineEdit" name="threshold">
       <property name="text">
        <string/>
+      </property>
+     </widget>
+    </item>
+    <item row="1" column="0">
+     <widget class="QLabel" name="label_2">
+      <property name="text">
+       <string>ADC Threshold</string>
+      </property>
+     </widget>
+    </item>
+    <item row="0" column="3">
+     <widget class="QSpinBox" name="motor_number">
+      <property name="minimum">
+       <number>1</number>
       </property>
      </widget>
     </item>
     <item row="0" column="1">
-     <widget class="QLineEdit" name="f_start"/>
-    </item>
-    <item row="2" column="0">
-     <widget class="QLabel" name="label_3">
-      <property name="text">
-       <string>Step Size</string>
-      </property>
-     </widget>
-    </item>
-    <item row="0" column="0">
-     <widget class="QLabel" name="label">
-      <property name="text">
-       <string>Target ADC</string>
-      </property>
-     </widget>
-    </item>
-    <item row="2" column="1">
-     <widget class="QLineEdit" name="step_size">
-      <property name="text">
+     <widget class="QComboBox" name="adc_channel">
+      <property name="currentText">
        <string/>
+      </property>
+      <property name="currentIndex">
+       <number>-1</number>
       </property>
      </widget>
     </item>
@@ -76,29 +103,29 @@
   <widget class="QWidget" name="verticalLayoutWidget">
    <property name="geometry">
     <rect>
-     <x>10</x>
-     <y>380</y>
+     <x>20</x>
+     <y>470</y>
      <width>92</width>
      <height>80</height>
     </rect>
    </property>
    <layout class="QVBoxLayout" name="verticalLayout">
     <item>
-     <widget class="QPushButton" name="start_focus_button">
+     <widget class="QPushButton" name="start_approach_button">
       <property name="text">
        <string>Start Approach</string>
       </property>
      </widget>
     </item>
     <item>
-     <widget class="QPushButton" name="stop_focus_button">
+     <widget class="QPushButton" name="stop_approach_button">
       <property name="text">
        <string>Stop Approach</string>
       </property>
      </widget>
     </item>
     <item>
-     <widget class="QRadioButton" name="focusing_button">
+     <widget class="QRadioButton" name="approaching_button">
       <property name="text">
        <string>Approaching</string>
       </property>

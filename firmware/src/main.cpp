@@ -2,12 +2,14 @@
 #include "AD5761.hpp"
 #include "ads868x.hpp"
 #include <ArduinoJson.h>
+#include <atomic>
+#include "esp_task_wdt.h"
 
 // Define pin connections and SPI interfaces
 #define DIR_PIN 27
-#define STEP_PIN1 32
+#define STEP_PIN3 32
 #define STEP_PIN2 33
-#define STEP_PIN3 25
+#define STEP_PIN1 25
 #define SLEEP_PIN 26
 
 #define VSPI_SCK 18
@@ -27,8 +29,8 @@ AD5761 dac_x = AD5761(&driver_spi, 15, 0b0000000101000);
 AD5761 dac_y = AD5761(&driver_spi, 2, 0b0000000101000);
 AD5761 dac_z = AD5761(&driver_spi, 4, 0b0000000101000);
 
-ADC_ads868x adc_0 = ADC_ads868x(&opu_spi, 1, 21);
-ADC_ads868x adc_1 = ADC_ads868x(&opu_spi, 1, 5);
+ADC_ads868x adc_0 = ADC_ads868x(&opu_spi, 1, 21, 0x0004);
+ADC_ads868x adc_1 = ADC_ads868x(&opu_spi, 1, 5, 0x0003);
 
 enum State
 {
@@ -91,18 +93,39 @@ MotorControlState motorCtrlState = {0, 0, 0, 0, 500, false};
 void handleReset()
 {
   dac_f.reset();
+  dac_f.write(1<<15); // Set to 0V
   dac_t.reset();
+  dac_t.write(1<<15); // Set to 0V
   dac_x.reset();
+  dac_x.write(1<<15); // Set to 0V
   dac_y.reset();
+  dac_y.write(1<<15); // Set to 0V
   dac_z.reset();
+  dac_z.write(1<<15); // Set to 0V
   adc_0.reset();
   adc_1.reset();
-  current_afm_state.dac_f_val = 0;
-  current_afm_state.dac_t_val = 0;
-  current_afm_state.dac_x_val = 0;
-  current_afm_state.dac_y_val = 0;
-  current_afm_state.dac_z_val = 0;
+  current_afm_state.dac_f_val = 1<<15;
+  current_afm_state.dac_t_val = 1<<15;
+  current_afm_state.dac_x_val = 1<<15;
+  current_afm_state.dac_y_val = 1<<15;
+  current_afm_state.dac_z_val = 1<<15;
   current_afm_state.current_state = IDLE;
+}
+
+void handleRestore()
+{
+  dac_f.reset();
+  dac_f.write(current_afm_state.dac_f_val); // Restore previous value
+  dac_t.reset();
+  dac_t.write(current_afm_state.dac_t_val); // Restore previous value
+  dac_x.reset();
+  dac_x.write(current_afm_state.dac_x_val); // Restore previous value
+  dac_y.reset();
+  dac_y.write(current_afm_state.dac_y_val); // Restore previous value
+  dac_z.reset();
+  dac_z.write(current_afm_state.dac_z_val); // Restore previous value
+  adc_0.reset();
+  adc_1.reset();
 }
 
 // Initialize motor control pins
@@ -118,16 +141,16 @@ void setupMotorPins()
   digitalWrite(SLEEP_PIN, LOW);
 }
 
-void startMotorMovement(uint8_t motorNumber, int steps, int direction, unsigned int stepDelay = 500)
+bool startMotorMovement(uint8_t motorNumber, int steps, int direction, unsigned int stepDelay = 500)
 {
   if (motorNumber < 1 || motorNumber > 3)
-    return;
+    return false;
 
   // Validate
   if (steps <= 0 || motorCtrlState.isMoving ||
       current_afm_state.motors[motorNumber - 1].status == MOTOR_MOVING)
   {
-    return;
+    return false;
   }
 
   // Update AFM state
@@ -143,7 +166,6 @@ void startMotorMovement(uint8_t motorNumber, int steps, int direction, unsigned 
   delay(1); // Wake-up time
   digitalWrite(DIR_PIN, direction);
   delayMicroseconds(50);
-
   // Update control state
   motorCtrlState.activeMotor = motorNumber;
   motorCtrlState.remainingSteps = steps;
@@ -151,6 +173,8 @@ void startMotorMovement(uint8_t motorNumber, int steps, int direction, unsigned 
   motorCtrlState.stepDelay = stepDelay;
   motorCtrlState.nextStepTime = micros() + stepDelay;
   motorCtrlState.isMoving = true;
+  
+  return true;
 }
 
 void updateMotorMovement()
@@ -161,7 +185,14 @@ void updateMotorMovement()
   unsigned long currentTime = micros();
   if (currentTime >= motorCtrlState.nextStepTime)
   {
-    // Pulse the appropriate step pin
+    // Calculate how many steps we need to take to catch up
+    unsigned long timeSinceLastStep = currentTime - motorCtrlState.nextStepTime;
+    int stepsToTake = 1 + (timeSinceLastStep / motorCtrlState.stepDelay);
+    
+    // Limit steps to remaining steps
+    stepsToTake = min(stepsToTake, motorCtrlState.remainingSteps);
+    
+    // Pulse the appropriate step pin for each step
     uint8_t stepPin;
     switch (motorCtrlState.activeMotor)
     {
@@ -178,18 +209,22 @@ void updateMotorMovement()
       return;
     }
 
-    digitalWrite(stepPin, HIGH);
-    delayMicroseconds(2);
-    digitalWrite(stepPin, LOW);
+    for (int i = 0; i < stepsToTake; i++)
+    {
+      digitalWrite(stepPin, HIGH);
+      delayMicroseconds(20);
+      digitalWrite(stepPin, LOW);
+      delayMicroseconds(20);
+    }
 
     // Update control state
-    motorCtrlState.remainingSteps--;
+    motorCtrlState.remainingSteps -= stepsToTake;
     motorCtrlState.nextStepTime = currentTime + motorCtrlState.stepDelay;
 
     // Update AFM state
     uint8_t motorIdx = motorCtrlState.activeMotor - 1;
     current_afm_state.motors[motorIdx].current_position +=
-        (motorCtrlState.direction ? 1 : -1);
+        (motorCtrlState.direction ? stepsToTake : -stepsToTake);
     current_afm_state.motors[motorIdx].last_update = millis();
 
     // Check completion
@@ -252,11 +287,44 @@ bool stopMotor()
   return true;
 }
 
+// Global atomic flag for ADC status
+std::atomic<bool> adcBusy(false);
+
+// Function to check if ADC is in use
+bool adcInUse()
+{
+  return adcBusy.load();
+}
+
+// Function to safely claim ADC access
+bool acquireADC()
+{
+  bool expected = false;
+  return adcBusy.compare_exchange_strong(expected, true);
+}
+
+// Function to release ADC access
+void releaseADC()
+{
+  adcBusy = false;
+}
+
 void updateAFMState()
 {
-  current_afm_state.adc_0_val = adc_0.readADC(); // Using FE channel as default
-  current_afm_state.adc_1_val = adc_1.readADC(); // Using FE channel as default
-  current_afm_state.timestamp = millis();
+  // Skip if ADC is busy
+  if (adcInUse())
+  {
+    return;
+  }
+
+  // Try to acquire ADC
+  if (acquireADC())
+  {
+    current_afm_state.adc_0_val = adc_0.readADC();
+    current_afm_state.adc_1_val = adc_1.readADC();
+    current_afm_state.timestamp = millis();
+    releaseADC();
+  }
 }
 
 JsonDocument getAFMStateAsJson()
@@ -298,7 +366,22 @@ JsonDocument getAFMStateAsJson()
   return doc;
 }
 
-// Functions for approaching
+// New blocking motor movement function
+bool moveMotorBlocking(uint8_t motorNumber, int steps, int direction, unsigned int stepDelay = 500)
+{
+  if (!startMotorMovement(motorNumber, steps, direction, stepDelay))
+  {
+    return false;
+  }
+
+  // Wait until movement is complete
+  while (motorCtrlState.isMoving)
+  {
+    updateMotorMovement();
+  }
+
+  return true;
+}
 
 String processCommand(const String &jsonCommand)
 {
@@ -334,17 +417,40 @@ String processCommand(const String &jsonCommand)
     handleReset();
     response["status"] = "success";
   }
+  else if (strcmp(command, "restore") == 0)
+  {
+    handleRestore();
+    response["status"] = "success";
+  }
   else if (strcmp(command, "get_status") == 0)
   {
     response = getAFMStateAsJson();
   }
   else if (strcmp(command, "read_adc") == 0)
   {
-    int adc_0_value = adc_0.readADC(); // Using FE channel as default
-    response["adc_0"] = adc_0_value;
-    int adc_1_value = adc_1.readADC(); // Using FE channel as default
-    response["adc_1"] = adc_1_value;
-    response["status"] = "success";
+    unsigned long start = millis();
+    while (adcInUse() && (millis() - start < 100))
+    {
+      delay(1); // Small delay to prevent busy-wait
+    }
+
+    if (acquireADC())
+    {
+      int adc_0_value = adc_0.readADC();
+      delayMicroseconds(10);
+      int adc_1_value = adc_1.readADC();
+      delayMicroseconds(10);
+      releaseADC();
+
+      response["adc_0"] = adc_0_value;
+      response["adc_1"] = adc_1_value;
+      response["status"] = "success";
+    }
+    else
+    {
+      response["status"] = "error";
+      response["message"] = "ADC busy - timeout";
+    }
   }
   else if (strcmp(command, "set_dac") == 0)
   {
@@ -528,6 +634,71 @@ String processCommand(const String &jsonCommand)
 
     response["status"] = "success";
   }
+  else if (strcmp(command, "move_motor_blocking") == 0)
+  {
+    // Get references to parameters first
+    const auto &motorParam = doc["motor"];
+    const auto &stepsParam = doc["steps"];
+    const auto &directionParam = doc["direction"];
+
+    // Validate required parameters
+    if (!motorParam.is<int>() || !stepsParam.is<int>() || !directionParam.is<int>())
+    {
+      response["status"] = "error";
+      response["message"] = "Missing required parameters (motor, steps, direction)";
+    }
+    // Validate motor number (1-3)
+    else if (motorParam.as<int>() < 1 || motorParam.as<int>() > 3)
+    {
+      response["status"] = "error";
+      response["message"] = "Invalid motor number (must be 1-3)";
+    }
+    // Validate steps (positive integer)
+    else if (stepsParam.as<int>() <= 0)
+    {
+      response["status"] = "error";
+      response["message"] = "Steps must be a positive integer";
+    }
+    // Validate direction (0 or 1)
+    else if (directionParam.as<int>() != 0 && directionParam.as<int>() != 1)
+    {
+      response["status"] = "error";
+      response["message"] = "Direction must be 0 (CCW) or 1 (CW)";
+    }
+    // Check if another motor is already moving
+    else if (isMotorMoving())
+    {
+      response["status"] = "error";
+      response["message"] = "Another motor is already moving";
+    }
+    else
+    {
+      // Get optional parameters with defaults
+      unsigned int speed = doc["speed"] | 500; // Default 500μs delay
+      speed = constrain(speed, 100, 5000);     // Clamp between 100-5000μs
+
+      // Start the movement and wait for completion
+      if (moveMotorBlocking(
+          motorParam.as<int>(),
+          stepsParam.as<int>(),
+          directionParam.as<int>(),
+          speed))
+      {
+        // Prepare success response
+        response["status"] = "completed";
+        response["motor"] = motorParam.as<int>();
+        response["steps"] = stepsParam.as<int>();
+        response["direction"] = directionParam.as<int>() ? "CW" : "CCW";
+        response["speed"] = speed;
+        response["final_position"] = current_afm_state.motors[motorParam.as<int>() - 1].current_position;
+      }
+      else
+      {
+        response["status"] = "error";
+        response["message"] = "Failed to start motor movement";
+      }
+    }
+  }
   else
   {
     response["status"] = "error";
@@ -541,23 +712,24 @@ String processCommand(const String &jsonCommand)
 
 TaskHandle_t PIDTaskHandle;
 
-// Your PID control function
 void runControl(void *parameter)
 {
-  const TickType_t xMaxBlockTime = pdMS_TO_TICKS(1); // 1 ms to allow FreeRTOS scheduling
+  TickType_t lastWakeTime = xTaskGetTickCount();
+  const TickType_t period = pdMS_TO_TICKS(1); // 1 ms control loop
+  esp_task_wdt_add(NULL);
 
   while (1)
   {
-    // Run the PID loop (replace with your actual PID function)
-    updateMotorMovement(); // Update motor movement
-    updateAFMState();      // Update the AFM state
-    // Allow some FreeRTOS scheduling (tweak delay if needed)
-    vTaskDelay(xMaxBlockTime);
+    updateMotorMovement();
+    updateAFMState();
+    esp_task_wdt_reset();
+    vTaskDelayUntil(&lastWakeTime, period);
   }
 }
 
 void setup()
 {
+  esp_task_wdt_init(5, true); // 5-second timeout, panic on trigger
   opu_spi.begin(VSPI_SCK, VSPI_MISO, VSPI_MOSI, -1);
   driver_spi.begin(HSPI_SCK, HSPI_MISO, HSPI_MOSI, -1);
   // Initialize motor control pins
@@ -575,7 +747,7 @@ void setup()
       "PIDTask",                // Task name
       4096,                     // Stack size
       NULL,                     // Task parameter
-      configMAX_PRIORITIES - 1, // Highest priority
+      configMAX_PRIORITIES - 2, // 
       &PIDTaskHandle,           // Task handle
       0                         // Run on Core 0
   );
