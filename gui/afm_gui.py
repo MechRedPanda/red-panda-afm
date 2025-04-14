@@ -1,7 +1,7 @@
 import sys
 import time
 from PyQt6.QtCore import QEvent, QTimer, Qt
-from PyQt6.QtGui import QIntValidator
+from PyQt6.QtGui import QIntValidator, QDoubleValidator
 from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox, QCheckBox, QWidget, QVBoxLayout
 import pyqtgraph as pg
 from afm import AFM, AFMState
@@ -37,9 +37,10 @@ class FocusWidget(QMainWindow, Ui_FocusWidget):
             pen=pg.mkPen('b', width=5), name="ADC 0")
         self.adc_1_plot = self.focus_plot_widget.plot(
             pen=pg.mkPen('r', width=5), name="ADC 1")
-            
+
         # Add vertical line for optimal focus value
-        self.optimal_line = self.focus_plot_widget.addLine(x=None, angle=90, pen=pg.mkPen('g', width=2, style=Qt.PenStyle.DashLine), name="Optimal Focus")
+        self.optimal_line = self.focus_plot_widget.addLine(x=None, angle=90, pen=pg.mkPen(
+            'g', width=2, style=Qt.PenStyle.DashLine), name="Optimal Focus")
         self.optimal_line.setVisible(False)  # Initially hidden
 
         self.timer = QTimer(self)
@@ -64,11 +65,14 @@ class FocusWidget(QMainWindow, Ui_FocusWidget):
         optimal_value = self.afm.get_optimal_focus()
         if optimal_value is not None:
             if self.afm.set_dac("F", optimal_value):
-                QMessageBox.information(self, "Success", f"Moving to optimal focus point: {optimal_value}")
+                QMessageBox.information(
+                    self, "Success", f"Moving to optimal focus point: {optimal_value}")
             else:
-                QMessageBox.warning(self, "Error", "Failed to move to optimal focus point")
+                QMessageBox.warning(
+                    self, "Error", "Failed to move to optimal focus point")
         else:
-            QMessageBox.warning(self, "Error", "No optimal focus point available")
+            QMessageBox.warning(
+                self, "Error", "No optimal focus point available")
 
     def update_plot(self):
         if self.afm.focus_results:
@@ -78,12 +82,12 @@ class FocusWidget(QMainWindow, Ui_FocusWidget):
 
             self.adc_0_plot.setData(dac_f_values, adc_0_values)
             self.adc_1_plot.setData(dac_f_values, adc_1_values)
-            
+
             # Check if focus has stopped or finished and we haven't shown results yet
             if not self.afm.is_focus_running() and not self.has_shown_results:
                 self.focusing_button.setChecked(False)
                 self.has_shown_results = True  # Mark that we've shown the results
-                
+
                 # Show auto-focus results and update label
                 optimal_value = self.afm.get_optimal_focus()
                 if optimal_value is not None:
@@ -99,7 +103,8 @@ class FocusWidget(QMainWindow, Ui_FocusWidget):
                     )
                 else:
                     self.auto_focus_value.setText("None")
-                    self.optimal_line.setVisible(False)  # Hide the line if no optimal value
+                    # Hide the line if no optimal value
+                    self.optimal_line.setVisible(False)
                     QMessageBox.warning(
                         self,
                         "Auto-Focus Results",
@@ -228,7 +233,7 @@ class ApproachWidget(QMainWindow, Ui_ApproachWidget):
             if len(steps_data) > 1:
                 # Update plot with the stored data
                 self.adc_plot.setData(steps_data, adc_data)
-                
+
                 # Update threshold lines to match the data range
                 if len(steps_data) > 0:
                     # Get initial ADC value for threshold lines
@@ -236,17 +241,16 @@ class ApproachWidget(QMainWindow, Ui_ApproachWidget):
                     threshold = int(self.threshold.text())
                     upper_thresh = initial_adc + threshold
                     lower_thresh = initial_adc - threshold
-                    
+
                     # Set threshold lines to span the same range as the data
-                    self.threshold_line_upper.setData([steps_data[0], steps_data[-1]], 
-                                                     [upper_thresh, upper_thresh])
-                    self.threshold_line_lower.setData([steps_data[0], steps_data[-1]], 
-                                                     [lower_thresh, lower_thresh])
-            
+                    self.threshold_line_upper.setData([steps_data[0], steps_data[-1]],
+                                                      [upper_thresh, upper_thresh])
+                    self.threshold_line_lower.setData([steps_data[0], steps_data[-1]],
+                                                      [lower_thresh, lower_thresh])
+
         else:
             if self.approaching_button.isChecked():
                 self.approaching_button.setChecked(False)
-
 
 
 class MainWindow(QMainWindow, Ui_MainWindow):
@@ -271,17 +275,151 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.close_button.clicked.connect(self.afm_close)
         self.restore_button.clicked.connect(self.restore_afm)
 
+        # Setup PID control
+        self.setup_pid_control()
+
         self.setup_plots()
         self.setup_dac_controls()
         self.setup_motor_ui()
-        self.setup_update_toggle()
 
         self.focus_widget_button.clicked.connect(self.open_focus_widget)
         self.approach_widget_button.clicked.connect(self.open_approach_widget)
 
+        # Connect target ADC value input
+        self.target_adc_value_input.editingFinished.connect(self.on_target_adc_changed)
+
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update_all)
         self.update_timer.start(100)
+
+    def setup_pid_control(self):
+        """Initialize PID control elements and connect signals"""
+        # Set up input validation for PID parameters
+        pid_validator = QDoubleValidator()
+        pid_validator.setBottom(0.0)
+        pid_validator.setTop(1000.0)
+        pid_validator.setDecimals(4)
+
+        # Apply validators to input boxes
+        self.p_input_box.setValidator(pid_validator)
+        self.i_input_box.setValidator(pid_validator)
+        self.d_input_box.setValidator(pid_validator)
+
+        # Set default values
+        self.p_input_box.setText("1.0")
+        self.i_input_box.setText("0.1")
+        self.d_input_box.setText("0.0")
+
+        # Connect signals
+        self.pid_toggle_button.stateChanged.connect(self.toggle_pid)
+        self.pid_reverse_button.stateChanged.connect(self.toggle_pid_reverse)
+
+        # Add status update timer
+        self.pid_status_timer = QTimer(self)
+        self.pid_status_timer.timeout.connect(self.update_pid_status)
+        self.pid_status_timer.start(100)  # Update every 100ms
+
+    def toggle_pid(self, state):
+        """Toggle PID control on/off"""
+        if not self.afm.is_connected():
+            QMessageBox.warning(self, "Not Connected",
+                                "Please connect to AFM first")
+            self.pid_toggle_button.setChecked(False)
+            return
+
+        try:
+            if state == Qt.CheckState.Checked.value:
+                # Enable PID with current parameters
+                self.apply_pid_parameters()
+            else:
+                # Disable PID
+                self.afm.disable_pid()
+        except Exception as e:
+            QMessageBox.warning(self, "PID Error",
+                                f"Failed to toggle PID: {str(e)}")
+            self.pid_toggle_button.setChecked(False)
+
+    def toggle_pid_reverse(self, state):
+        """Toggle PID reverse mode"""
+        if not self.afm.is_connected():
+            return
+
+        try:
+            # Get current PID parameters
+            kp = float(self.p_input_box.text())
+            ki = float(self.i_input_box.text())
+            kd = float(self.d_input_box.text())
+            if self.target_adc_value_input.text():
+                target = int(self.target_adc_value_input.text())
+            else:
+                target = self.afm.status_queue[-1].adc_0
+                self.target_adc_value_input.setText(str(target))
+
+            # Apply parameters with new reverse state
+            self.afm.set_pid_parameters(
+                kp=kp, ki=ki, kd=kd, invert=state == Qt.CheckState.Checked.value)
+
+            # If PID is enabled, re-enable it with new parameters
+            if self.pid_toggle_button.isChecked():
+                self.afm.enable_pid(target=target)
+
+        except Exception as e:
+            QMessageBox.warning(self, "PID Error",
+                                f"Failed to toggle PID reverse: {str(e)}")
+            self.pid_reverse_button.setChecked(not state)
+
+    def apply_pid_parameters(self):
+        """Apply current PID parameters to the AFM"""
+        if not self.afm.is_connected():
+            QMessageBox.warning(self, "Not Connected",
+                                "Please connect to AFM first")
+            return
+
+        try:
+            # Get values from input boxes
+            kp = float(self.p_input_box.text())
+            ki = float(self.i_input_box.text())
+            kd = float(self.d_input_box.text())
+            pid_reverse = self.pid_reverse_button.isChecked()
+            
+            # Get target ADC value, use current value if empty
+            if self.target_adc_value_input.text():
+                target = int(self.target_adc_value_input.text())
+            else:
+                target = self.afm.status_queue[-1].adc_0
+                self.target_adc_value_input.setText(str(target))
+
+            # Apply parameters
+            self.afm.set_pid_parameters(
+                kp=kp, ki=ki, kd=kd, invert=pid_reverse)
+
+            # If PID is enabled, re-enable it with new parameters
+            if self.pid_toggle_button.isChecked():
+                self.afm.enable_pid(target=target)
+
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input",
+                                "Please enter valid numbers for PID parameters")
+        except Exception as e:
+            QMessageBox.warning(self, "PID Error",
+                                f"Failed to apply PID parameters: {str(e)}")
+
+    def update_pid_status(self):
+        """Update PID status display"""
+        if not self.afm.is_connected():
+            return
+
+        try:
+            status = self.afm.get_pid_status()
+            if status:
+                # Update checkbox state based on PID state
+                self.pid_toggle_button.setChecked(status.get('enabled', False))
+
+                # Don't update the target_adc_value_input or P, I, D parameters
+                # These should only be set by user input
+
+        except Exception as e:
+            print(f"Error updating PID status: {str(e)}")
 
     def setup_plots(self):
         self.adc_plot_widget.setTitle(
@@ -306,8 +444,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.dac_plot_widget.showGrid(x=True, y=True)
         self.dac_plot_widget.setBackground('white')
         self.dac_plot_widget.addLegend()
-        self.dac_f_plot = self.dac_plot_widget.plot(pen=pg.mkPen('b', width=2), name="DAC F")
-        self.dac_t_plot = self.dac_plot_widget.plot(pen=pg.mkPen('g', width=2), name="DAC T")
+        self.dac_f_plot = self.dac_plot_widget.plot(
+            pen=pg.mkPen('b', width=2), name="DAC F")
+        self.dac_t_plot = self.dac_plot_widget.plot(
+            pen=pg.mkPen('g', width=2), name="DAC T")
 
     def refresh_ports(self):
         current_port = self.port_list_box.currentText()
@@ -371,20 +511,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         except Exception as e:
             print(f"Failed to send reset command: {e}")
 
-    def setup_update_toggle(self):
-        """Add a toggle switch for enabling/disabling automatic updates"""
-        self.update_toggle.setChecked(True)
-        self.update_toggle.setStyleSheet("""
-            QCheckBox {
-                padding: 5px;
-                font-weight: bold;
-            }
-            QCheckBox::indicator {
-                width: 20px;
-                height: 20px;
-            }
-        """)
-
     def setup_dac_controls(self):
         """Initialize DAC controls with update toggle support"""
         self.max_dac_value = 2**16 - 1
@@ -434,7 +560,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             if success:
                 button.setText("Sent!")
                 # If updates are off, force one update to reflect new value
-                if not self.update_toggle.isChecked():
+                if not self.dac_enable_toggle.isChecked():
                     self.manual_status_refresh(key, value)
             else:
                 button.setText("Error!")
@@ -493,7 +619,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
             # If updates are disabled and user moved slider,
             # visually update but don't send to hardware
-            if not self.update_toggle.isChecked():
+            if not self.dac_enable_toggle.isChecked():
                 button.setStyleSheet("background-color: #FFA500;")  # Orange
                 button.setText("Click to Send")
             else:
@@ -539,7 +665,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 lineedit.blockSignals(False)
 
                 # Visual feedback based on update mode
-                if not self.update_toggle.isChecked():
+                if not self.dac_enable_toggle.isChecked():
                     button.setStyleSheet(
                         "background-color: #FFA500; color: black;")
                     button.setText("Click to Send")
@@ -556,7 +682,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def update_dac_controls(self, status):
         """Update all DAC controls respecting the toggle switch"""
-        if not self.update_toggle.isChecked():
+        if not self.dac_enable_toggle.isChecked():
             return
 
         if (self.dac_update_lock or
@@ -589,7 +715,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         latest_status = list(self.afm.status_queue)[-1]
 
-        if self.update_toggle.isChecked():
+        if self.dac_enable_toggle.isChecked():
             self.update_dac_controls(latest_status)
         self.update_plots(latest_status)
         self.update_motor_status(latest_status)
@@ -750,14 +876,32 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if not self.afm.is_connected():
             QMessageBox.warning(self, "Error", "AFM is not connected")
             return
-            
+
         try:
             if self.afm.restore():
-                QMessageBox.information(self, "Success", "AFM restored to default settings")
+                QMessageBox.information(
+                    self, "Success", "AFM restored to default settings")
             else:
-                QMessageBox.warning(self, "Error", "Failed to restore AFM settings")
+                QMessageBox.warning(
+                    self, "Error", "Failed to restore AFM settings")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error during restore: {str(e)}")
+            QMessageBox.critical(
+                self, "Error", f"Error during restore: {str(e)}")
+
+    def on_target_adc_changed(self):
+        """Handle changes to the target ADC value input"""
+        if not self.afm.is_connected() or not self.pid_toggle_button.isChecked():
+            return
+
+        try:
+            # Get the new target value
+            if self.target_adc_value_input.text():
+                target = int(self.target_adc_value_input.text())
+                # Update PID with new target
+                self.afm.enable_pid(target=target)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input",
+                              "Please enter a valid number for target ADC value")
 
 
 if __name__ == "__main__":

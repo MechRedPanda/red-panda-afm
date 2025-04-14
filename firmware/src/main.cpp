@@ -73,6 +73,19 @@ struct AFM_State
   // System state
   int32_t timestamp = 0;
   enum State current_state = IDLE;
+
+  // PID Control
+  bool pid_enabled = false;
+  uint16_t pid_target = 0;
+  float pid_kp = 1.0;
+  float pid_ki = 0.0;
+  float pid_kd = 0.0;
+  bool pid_invert = false;
+  float pid_integral = 0;
+  uint16_t pid_last_error = 0;
+  uint32_t pid_last_time = 0;
+  float pid_slew_rate = 1000.0; // Maximum change per second
+  float pid_last_output = 0;
 };
 
 AFM_State current_afm_state;
@@ -381,6 +394,49 @@ bool moveMotorBlocking(uint8_t motorNumber, int steps, int direction, unsigned i
   }
 
   return true;
+}
+
+// PID Control function
+void updatePIDControl() {
+  if (!current_afm_state.pid_enabled) return;
+
+  uint32_t current_time = millis();
+  uint32_t dt = current_time - current_afm_state.pid_last_time;
+  if (dt == 0) return; // Prevent division by zero
+
+  // Calculate error
+  int32_t error = current_afm_state.pid_target - current_afm_state.adc_0_val;
+  if (current_afm_state.pid_invert) error = -error;
+
+  // Calculate PID terms
+  float p_term = current_afm_state.pid_kp * error;
+  current_afm_state.pid_integral += current_afm_state.pid_ki * error * dt / 1000.0;
+  float d_term = current_afm_state.pid_kd * (error - current_afm_state.pid_last_error) / (dt / 1000.0);
+
+  // Calculate desired output
+  float desired_output = p_term + current_afm_state.pid_integral + d_term;
+
+  // Apply slew rate limiting
+  float max_change = current_afm_state.pid_slew_rate * dt / 1000.0; // Convert to per millisecond
+  float delta = desired_output - current_afm_state.pid_last_output;
+  
+  if (abs(delta) > max_change) {
+    delta = (delta > 0) ? max_change : -max_change;
+  }
+  
+  float output = current_afm_state.pid_last_output + delta;
+
+  // Clamp output to DAC range (0-65535)
+  output = constrain(output, 0, 65535);
+
+  // Update DAC
+  dac_z.write(static_cast<uint16_t>(output));
+  current_afm_state.dac_z_val = static_cast<uint16_t>(output);
+
+  // Update state
+  current_afm_state.pid_last_error = error;
+  current_afm_state.pid_last_time = current_time;
+  current_afm_state.pid_last_output = output;
 }
 
 String processCommand(const String &jsonCommand)
@@ -699,6 +755,54 @@ String processCommand(const String &jsonCommand)
       }
     }
   }
+  else if (strcmp(command, "pid_control") == 0)
+  {
+    if (doc["action"] == "enable")
+    {
+      current_afm_state.pid_enabled = true;
+      current_afm_state.pid_target = doc["target"] | current_afm_state.adc_0_val;
+      current_afm_state.pid_last_time = millis();
+      current_afm_state.pid_integral = 0;
+      current_afm_state.pid_last_error = 0;
+      current_afm_state.pid_last_output = current_afm_state.dac_z_val;
+      response["status"] = "success";
+      response["message"] = "PID control enabled";
+    }
+    else if (doc["action"] == "disable")
+    {
+      current_afm_state.pid_enabled = false;
+      response["status"] = "success";
+      response["message"] = "PID control disabled";
+    }
+    else if (doc["action"] == "set_params")
+    {
+      current_afm_state.pid_kp = doc["kp"] | current_afm_state.pid_kp;
+      current_afm_state.pid_ki = doc["ki"] | current_afm_state.pid_ki;
+      current_afm_state.pid_kd = doc["kd"] | current_afm_state.pid_kd;
+      current_afm_state.pid_invert = doc["invert"] | current_afm_state.pid_invert;
+      current_afm_state.pid_slew_rate = doc["slew_rate"] | current_afm_state.pid_slew_rate;
+      response["status"] = "success";
+      response["message"] = "PID parameters updated";
+    }
+    else if (doc["action"] == "get_status")
+    {
+      response["enabled"] = current_afm_state.pid_enabled;
+      response["target"] = current_afm_state.pid_target;
+      response["kp"] = current_afm_state.pid_kp;
+      response["ki"] = current_afm_state.pid_ki;
+      response["kd"] = current_afm_state.pid_kd;
+      response["invert"] = current_afm_state.pid_invert;
+      response["slew_rate"] = current_afm_state.pid_slew_rate;
+      response["current_value"] = current_afm_state.adc_0_val;
+      response["output"] = current_afm_state.dac_z_val;
+      response["status"] = "success";
+    }
+    else
+    {
+      response["status"] = "error";
+      response["message"] = "Invalid PID action";
+    }
+  }
   else
   {
     response["status"] = "error";
@@ -722,6 +826,7 @@ void runControl(void *parameter)
   {
     updateMotorMovement();
     updateAFMState();
+    updatePIDControl(); // Add PID control update
     esp_task_wdt_reset();
     vTaskDelayUntil(&lastWakeTime, period);
   }

@@ -94,7 +94,7 @@ class AFM:
                 return port.device
         return None
 
-    def connect(self, port: Optional[str] = None, baudrate: int = BAUDRATE, 
+    def connect(self, port: Optional[str] = None, baudrate: int = BAUDRATE,
                 timeout: float = TIMEOUT) -> bool:
         """Connect to the AFM device via serial."""
         try:
@@ -159,7 +159,7 @@ class AFM:
             self.serial_conn.reset_input_buffer()
             command_json = json.dumps(command) + "\n"
             self.serial_conn.write(command_json.encode('utf-8'))
-            
+
             # Read response with retry logic
             max_retries = 3
             for attempt in range(max_retries):
@@ -173,7 +173,7 @@ class AFM:
                                 time.sleep(0.1)  # Wait a bit before retrying
                                 break
                             return None
-                        
+
                         response += line
                         # Try to parse the response
                         try:
@@ -233,7 +233,8 @@ class AFM:
 
     def get_status(self) -> Optional[AFMStatus]:
         """Get current status from AFM device."""
-        response = self.send_and_receive({"command": "get_status"}, timeout=2.0)
+        response = self.send_and_receive(
+            {"command": "get_status"}, timeout=2.0)
         if response:
             try:
                 def get_motor_data(num: int) -> Dict:
@@ -251,17 +252,20 @@ class AFM:
                     motor_1=MotorStatus(
                         position=int(get_motor_data(1).get("position", 0)),
                         target=int(get_motor_data(1).get("target", 0)),
-                        is_running=bool(get_motor_data(1).get("is_running", False))
+                        is_running=bool(get_motor_data(
+                            1).get("is_running", False))
                     ),
                     motor_2=MotorStatus(
                         position=int(get_motor_data(2).get("position", 0)),
                         target=int(get_motor_data(2).get("target", 0)),
-                        is_running=bool(get_motor_data(2).get("is_running", False))
+                        is_running=bool(get_motor_data(
+                            2).get("is_running", False))
                     ),
                     motor_3=MotorStatus(
                         position=int(get_motor_data(3).get("position", 0)),
                         target=int(get_motor_data(3).get("target", 0)),
-                        is_running=bool(get_motor_data(3).get("is_running", False))
+                        is_running=bool(get_motor_data(
+                            3).get("is_running", False))
                     ),
                     state=AFMState(response.get("state", "IDLE"))
                 )
@@ -295,8 +299,8 @@ class AFM:
         print(response)
         return response
 
-    def move_motor_blocking(self, motor: int, steps: int, 
-                          speed: Optional[int] = None) -> Optional[Dict]:
+    def move_motor_blocking(self, motor: int, steps: int,
+                            speed: Optional[int] = None) -> Optional[Dict]:
         """Move motor and wait until movement is complete."""
         if motor not in {1, 2, 3}:
             raise ValueError("Motor must be 1, 2, or 3")
@@ -311,11 +315,11 @@ class AFM:
             'direction': direction,
             'speed': speed
         })
-        
+
         if response is None:
             print("Failed to receive response from motor movement")
             return None
-            
+
         return response
 
     def stop_motor(self, motor: Optional[int] = None) -> Optional[Dict]:
@@ -351,60 +355,61 @@ class AFM:
     def ramp_dac(self, channel: str, target_value: int, step_size: int = 100, delay_ms: int = 10) -> bool:
         """
         Gradually ramp DAC value from current to target value.
-        
+
         Args:
             channel (str): DAC channel (F, T, X, Y, Z)
             target_value (int): Target DAC value to reach
             step_size (int): Number of steps to change per iteration
             delay_ms (int): Delay between steps in milliseconds
-            
+
         Returns:
             bool: True if successful, False otherwise
         """
         if not self.is_connected():
             return False
-            
+
         try:
             # Get current DAC value
             status = self.get_status()
             if not status:
                 return False
-                
+
             current_value = getattr(status, f'dac_{channel.lower()}')
-            
+
             # Calculate number of steps needed
             steps = abs(target_value - current_value)
             if steps == 0:
                 return True  # Already at target
-                
+
             # Determine direction
             direction = 1 if target_value > current_value else -1
-            
+
             # Calculate number of iterations
             iterations = steps // step_size
             if steps % step_size != 0:
                 iterations += 1
-                
+
             # Perform the ramp
             for i in range(iterations):
                 # Calculate next value
-                next_value = current_value + (direction * min(step_size, steps - (i * step_size)))
-                
+                next_value = current_value + \
+                    (direction * min(step_size, steps - (i * step_size)))
+
                 # Set the new value using send_and_receive
                 response = self.send_and_receive({
                     "command": "set_dac",
                     "channel": channel,
                     "value": next_value
                 })
-                
+
                 if response is None:
                     return False
-                    
+
                 # Wait for the specified delay
                 time.sleep(delay_ms / 1000.0)
-                
+
             return True
-            
+
         except Exception as e:
             print(f"Error ramping DAC: {e}")
             return False
@@ -420,13 +425,13 @@ class AFM:
         """
         if not self.is_connected():
             return False
-            
+
         try:
             response = self.send_and_receive({
                 "command": "restore"
             })
             return response is not None
-            
+
         except Exception as e:
             print(f"Error during restore: {e}")
             return False
@@ -435,7 +440,7 @@ class AFM:
     def focus(self, start: int, end: int, step_size: int) -> bool:
         """Start a DAC sweep on dac_f. Results are available in self.focus_results.
         Automatically finds and stores the optimal focus point.
-        
+
         Args:
             start (int): Starting DAC value
             end (int): Ending DAC value
@@ -462,13 +467,13 @@ class AFM:
 
             try:
                 self.set_state(AFMState.FOCUSING)
-                
+
                 # Ramp to initial position and wait
                 if not self.ramp_dac("F", start, step_size=100, delay_ms=10):
                     print("Failed to ramp to initial position")
                     return
                 time.sleep(1.0)  # Wait for 1 second before starting scan
-                
+
                 for dac_f_value in steps:
                     if self.focus_interrupted:
                         print("Focus sweep interrupted.")
@@ -482,7 +487,7 @@ class AFM:
                     if response is None:
                         continue
                     time.sleep(0.01)  # Allow time for DAC to settle
-                    
+
                     response = self.send_and_receive(
                         {"command": "read_adc"},
                         timeout=0.5
@@ -499,8 +504,9 @@ class AFM:
                 if len(self.focus_results) > 0:
                     self.optimal_focus_value = self.find_optimal_focus()
                     if self.optimal_focus_value is not None:
-                        print(f"Optimal focus point found: {self.optimal_focus_value}")
-                
+                        print(
+                            f"Optimal focus point found: {self.optimal_focus_value}")
+
                 self.focus_running = False
                 self.set_idle()
 
@@ -526,19 +532,19 @@ class AFM:
         # Find min and max ADC values
         min_adc = min(adc_values)
         max_adc = max(adc_values)
-        
+
         # Find corresponding DAC values
         min_dac = dac_values[adc_values.index(min_adc)]
         max_dac = dac_values[adc_values.index(max_adc)]
-        
+
         # Calculate midpoint
         optimal_dac = (min_dac + max_dac) // 2
-        
+
         print(f"Focus analysis:")
         print(f"Min ADC: {min_adc} at DAC: {min_dac}")
         print(f"Max ADC: {max_adc} at DAC: {max_dac}")
         print(f"Optimal DAC: {optimal_dac}")
-        
+
         return optimal_dac
 
     def stop_focus(self) -> None:
@@ -552,7 +558,7 @@ class AFM:
     # Approach Methods
     def approach(self, motor: int, step_size: int, adc_channel: int = 0, threshold: int = 10, max_steps: int = None, polling_interval: float = 0.05):
         """Approach procedure that moves a motor until ADC value changes by threshold.
-        
+
         Args:
             motor (int): Motor number (1, 2, or 3)
             step_size (int): Number of steps to move in each iteration. Positive for forward, negative for backward.
@@ -616,8 +622,10 @@ class AFM:
 
                     # Get current ADC value and position
                     current_adc = status.adc_0 if adc_channel == 0 else status.adc_1
-                    current_position = getattr(status, f"motor_{motor}").position
-                    total_steps_moved += abs(step_size)  # Track absolute steps moved
+                    current_position = getattr(
+                        status, f"motor_{motor}").position
+                    # Track absolute steps moved
+                    total_steps_moved += abs(step_size)
 
                     # Store data point
                     self.approach_data.append({
@@ -628,7 +636,8 @@ class AFM:
                     print(self.approach_data[-1])
                     # Check if threshold is reached
                     if abs(current_adc - initial_adc) >= threshold:
-                        print(f"Threshold reached after {total_steps_moved} steps")
+                        print(
+                            f"Threshold reached after {total_steps_moved} steps")
                         break
 
                     # Check max steps
@@ -658,7 +667,8 @@ class AFM:
             print("Stopping approach...")
             self._approach_event.set()
             # Wait for thread to finish
-            self._approach_thread.join(timeout=2.0)  # Increased timeout to 2 seconds
+            # Increased timeout to 2 seconds
+            self._approach_thread.join(timeout=2.0)
             if self._approach_thread.is_alive():
                 print("Warning: Approach thread did not stop gracefully")
             self._approach_thread = None
@@ -672,6 +682,130 @@ class AFM:
     def is_approach_running(self) -> bool:
         """Check if approach is currently active."""
         return self.busy  # Simplified check - if we're busy, we're running
+
+    def enable_pid(self, target: Optional[int] = None) -> str:
+        """Enable PID control.
+
+        Args:
+            target (Optional[int]): Target ADC value. If None, current ADC value is used.
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if not self.is_connected():
+            return "Not connected"
+
+        try:
+            # Prepare command
+            command = {
+                "command": "pid_control",
+                "action": "enable"
+            }
+
+            # Add target if specified
+            if target is not None:
+                command["target"] = target
+
+            # Send command
+            return self.send_and_receive(command)
+
+        except Exception as e:
+            return(f"Error enabling PID: {e}")
+
+    def disable_pid(self) -> bool:
+        """Disable PID control.
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if not self.is_connected():
+            return False
+
+        try:
+            # Send disable command
+            response = self.send_and_receive({
+                "command": "pid_control",
+                "action": "disable"
+            })
+            return response.get("status") == "success"
+
+        except Exception as e:
+            print(f"Error disabling PID: {e}")
+            return False
+
+    def set_pid_parameters(self, kp: Optional[float] = None, ki: Optional[float] = None,
+                           kd: Optional[float] = None, invert: Optional[bool] = None) -> bool:
+        """Set PID control parameters.
+
+        Args:
+            kp (Optional[float]): Proportional gain
+            ki (Optional[float]): Integral gain
+            kd (Optional[float]): Derivative gain
+            invert (Optional[bool]): Whether to invert the PID output
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if not self.is_connected():
+            return False
+
+        try:
+            # Prepare command
+            command = {
+                "command": "pid_control",
+                "action": "set_params"
+            }
+
+            # Add parameters if specified
+            if kp is not None:
+                command["kp"] = kp
+            if ki is not None:
+                command["ki"] = ki
+            if kd is not None:
+                command["kd"] = kd
+            if invert is not None:
+                command["invert"] = invert
+
+            # Send command
+            response = self.send_and_receive(command)
+            return response.get("status") == "success"
+
+        except Exception as e:
+            print(f"Error setting PID parameters: {e}")
+            return False
+
+    def get_pid_status(self) -> Optional[Dict]:
+        """Get current PID control status.
+
+        Returns:
+            Optional[Dict]: Dictionary containing PID status information, or None if failed
+        """
+        if not self.is_connected():
+            return None
+
+        try:
+            # Send get status command
+            response = self.send_and_receive({
+                "command": "pid_control",
+                "action": "get_status"
+            })
+
+            if response.get("status") == "success":
+                return {
+                    "enabled": response.get("enabled", False),
+                    "target": response.get("target", 0),
+                    "kp": response.get("kp", 0),
+                    "ki": response.get("ki", 0),
+                    "kd": response.get("kd", 0),
+                    "invert": response.get("invert", False),
+                    "current_value": response.get("current_value", 0),
+                    "output": response.get("output", 0)
+                }
+            return None
+
+        except Exception as e:
+            print(f"Error getting PID status: {e}")
+            return None
 
 
 if __name__ == "__main__":
