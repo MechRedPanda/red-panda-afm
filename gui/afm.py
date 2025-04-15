@@ -556,16 +556,18 @@ class AFM:
         return self.focus_running
 
     # Approach Methods
-    def approach(self, motor: int, step_size: int, adc_channel: int = 0, threshold: int = 10, max_steps: int = None, polling_interval: float = 0.05):
-        """Approach procedure that moves a motor until ADC value changes by threshold.
+    def approach(self, motor: int, step_size: int, threshold: int = 10, max_steps: int = None) -> bool:
+        """Start the approach procedure on the ESP32.
 
         Args:
             motor (int): Motor number (1, 2, or 3)
-            step_size (int): Number of steps to move in each iteration. Positive for forward, negative for backward.
-            adc_channel (int): ADC channel to monitor (0 or 1)
+            step_size (int): Number of steps to move in each iteration. Must be positive.
             threshold (int): Threshold value for ADC change
-            max_steps (int): Maximum total steps to move (None for no limit)
-            polling_interval (float): Time between movements in seconds
+            max_steps (int): Maximum total steps to move. Positive for forward, negative for backward.
+                            None for no limit.
+
+        Returns:
+            bool: True if approach started successfully, False otherwise
         """
         if not self.is_connected():
             return False
@@ -576,112 +578,83 @@ class AFM:
         # Validate parameters
         if motor not in [1, 2, 3]:
             return False
-        if adc_channel not in [0, 1]:
-            return False
         if threshold <= 0:
             return False
-        if max_steps is not None and max_steps <= 0:
-            return False
-        if step_size == 0:
-            return False  # Don't allow zero step size
-
-        # Clear previous approach data
-        self.approach_data = []
-
-        # Get initial status
-        status = self.get_status()
-        if not status:
+        if step_size <= 0:
             return False
 
-        # Store initial values
-        initial_adc = status.adc_0 if adc_channel == 0 else status.adc_1
-        initial_position = getattr(status, f"motor_{motor}").position
+        try:
+            # Prepare command
+            command = {
+                "command": "approach",
+                "action": "start",
+                "motor": motor,
+                "step_size": step_size,
+                "threshold": threshold,
+                "max_steps": max_steps
+            }
 
-        def approach_thread():
-            try:
+            # Send command
+            response = self.send_and_receive(command)
+            print(f"Approach response: {response}")
+            if response and response.get("status") == "started":
                 self.busy = True
-                self._approach_event.clear()
-                self.set_state(AFMState.APPROACHING)
+                return True
+            return False
 
-                total_steps_moved = 0
-                while True:
-                    if self._approach_event.is_set():
-                        print("Approach interrupted by stop signal")
-                        break
+        except Exception as e:
+            print(f"Error starting approach: {e}")
+            return False
 
-                    # Move motor by step_size (direction is determined by step_size sign)
-                    if not self.move_motor_blocking(motor, step_size):
-                        print("Failed to move motor")
-                        break
+    def stop_approach(self) -> bool:
+        """Stop the currently running approach procedure.
 
-                    # Get current status
-                    status = self.get_status()
-                    if not status:
-                        print("Failed to get status")
-                        break
+        Returns:
+            bool: True if approach stopped successfully, False otherwise
+        """
+        if not self.is_connected():
+            return False
 
-                    # Get current ADC value and position
-                    current_adc = status.adc_0 if adc_channel == 0 else status.adc_1
-                    current_position = getattr(
-                        status, f"motor_{motor}").position
-                    # Track absolute steps moved
-                    total_steps_moved += abs(step_size)
-
-                    # Store data point
-                    self.approach_data.append({
-                        'steps': current_position - initial_position,
-                        'adc': current_adc,
-                        'position': current_position
-                    })
-                    print(self.approach_data[-1])
-                    # Check if threshold is reached
-                    if abs(current_adc - initial_adc) >= threshold:
-                        print(
-                            f"Threshold reached after {total_steps_moved} steps")
-                        break
-
-                    # Check max steps
-                    if max_steps is not None and total_steps_moved >= max_steps:
-                        print(f"Reached maximum steps: {max_steps}")
-                        break
-
-                    time.sleep(polling_interval)
-
-            except Exception as e:
-                print(f"Error in approach thread: {e}")
-            finally:
+        try:
+            response = self.send_and_receive({
+                "command": "approach",
+                "action": "stop"
+            })
+            if response and response.get("status") == "stopped":
                 self.busy = False
-                self.set_state(AFMState.IDLE)
-                # Don't clear the event here, let stop_approach handle it
+                return True
+            return False
 
-        # Start approach in a separate thread
-        self._approach_thread = threading.Thread(target=approach_thread)
-        self._approach_thread.daemon = True
-        self._approach_thread.start()
+        except Exception as e:
+            print(f"Error stopping approach: {e}")
+            return False
 
-        return True
+    def get_approach_data(self) -> Optional[List[Dict]]:
+        """Get the approach data from the ESP32.
 
-    def stop_approach(self) -> None:
-        """Request the currently running approach to stop."""
-        if self.busy:  # Check busy flag first
-            print("Stopping approach...")
-            self._approach_event.set()
-            # Wait for thread to finish
-            # Increased timeout to 2 seconds
-            self._approach_thread.join(timeout=2.0)
-            if self._approach_thread.is_alive():
-                print("Warning: Approach thread did not stop gracefully")
-            self._approach_thread = None
-            self._approach_event.clear()  # Clear the event after thread is done
-            self.busy = False
-            self.set_state(AFMState.IDLE)
-            print("Approach stopped")
-        else:
-            print("Approach not running")
+        Returns:
+            Optional[List[Dict]]: List of approach data points, or None if failed
+        """
+        if not self.is_connected():
+            return None
+
+        try:
+            response = self.send_and_receive({
+                "command": "approach",
+                "action": "get_data"
+            })
+            print(f"Approach data: {response}")
+            if response and response.get("status") == "success":
+                return response.get("data", [])
+            return None
+
+        except Exception as e:
+            print(f"Error getting approach data: {e}")
+            return None
 
     def is_approach_running(self) -> bool:
         """Check if approach is currently active."""
-        return self.busy  # Simplified check - if we're busy, we're running
+        return self.busy
 
     def enable_pid(self, target: Optional[int] = None) -> str:
         """Enable PID control.
@@ -710,7 +683,7 @@ class AFM:
             return self.send_and_receive(command)
 
         except Exception as e:
-            return(f"Error enabling PID: {e}")
+            return (f"Error enabling PID: {e}")
 
     def disable_pid(self) -> bool:
         """Disable PID control.

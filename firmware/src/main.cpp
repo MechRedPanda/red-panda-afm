@@ -102,6 +102,28 @@ struct AFMState {
     float pid_slew_rate = 1000.0; // Maximum change per second
     float pid_last_output = 0;
     float pid_bias = 0; // Initial bias value
+
+    // Approach Data
+    struct ApproachData {
+        int32_t steps;
+        uint16_t adc;
+        int32_t position;
+    };
+    static const int MAX_APPROACH_POINTS = 1000;
+    ApproachData approach_data[MAX_APPROACH_POINTS];
+    int approach_data_count = 0;
+    bool approach_running = false;
+    uint8_t approach_motor = 0;
+    int approach_step_size = 0;
+    int approach_direction = 0;
+    uint16_t approach_threshold = 0;
+    uint16_t approach_initial_adc = 0;
+    int32_t approach_initial_position = 0;
+    int32_t approach_max_steps = 0;
+    unsigned long approach_polling_interval = 50; // ms
+    unsigned long approach_last_update = 0;
+    int32_t approach_last_stored_step = 0;  // Track last stored step
+    unsigned int approach_speed = 500; // Default step delay in microseconds
 };
 
 // ============================================================================
@@ -367,6 +389,88 @@ void updatePIDControl() {
 }
 
 // ============================================================================
+// Approach Control Functions
+// ============================================================================
+
+bool startApproach(uint8_t motor, int step_size, uint16_t threshold, int32_t max_steps, unsigned int speed = 500) {
+    if (motor < 1 || motor > 3) return false;
+    if (step_size == 0) return false;
+    if (threshold <= 0) return false;
+    if (max_steps == 0) return false;  // max_steps must be non-zero
+    if (current_afm_state.approach_running) return false;
+    if (isMotorMoving()) return false;
+
+    // Clear previous approach data
+    current_afm_state.approach_data_count = 0;
+
+    // Get initial values
+    current_afm_state.approach_initial_adc = current_afm_state.adc_0_val;
+    current_afm_state.approach_initial_position = current_afm_state.motors[motor - 1].current_position;
+
+    // Set approach parameters
+    current_afm_state.approach_motor = motor;
+    current_afm_state.approach_step_size = abs(step_size);
+    current_afm_state.approach_direction = max_steps > 0 ? 1 : 0;  // Direction based on max_steps
+    current_afm_state.approach_threshold = threshold;
+    current_afm_state.approach_max_steps = abs(max_steps);  // Store absolute value
+    current_afm_state.approach_speed = speed;
+    current_afm_state.approach_running = true;
+    current_afm_state.approach_last_update = millis();
+    current_afm_state.current_state = SystemState::APPROACHING;
+
+    // Start motor movement with max steps
+    if (!startMotorMovement(
+        current_afm_state.approach_motor,
+        current_afm_state.approach_max_steps,
+        current_afm_state.approach_direction,
+        current_afm_state.approach_speed
+    )) {
+        current_afm_state.approach_running = false;
+        current_afm_state.current_state = SystemState::IDLE;
+        return false;
+    }
+
+    return true;
+}
+
+void stopApproach() {
+    if (current_afm_state.approach_running) {
+        stopMotor();
+        current_afm_state.approach_running = false;
+        current_afm_state.current_state = SystemState::IDLE;
+    }
+}
+
+void updateApproach() {
+    if (!current_afm_state.approach_running) return;
+
+    unsigned long current_time = millis();
+    if (current_time - current_afm_state.approach_last_update < current_afm_state.approach_polling_interval) {
+        return;
+    }
+
+    // Check threshold continuously
+    if (abs(current_afm_state.adc_0_val - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold) {
+        stopApproach();
+        return;
+    }
+
+    // Store data when we've moved at least step_size since last storage
+    int32_t current_steps = abs(current_afm_state.motors[current_afm_state.approach_motor - 1].current_position - 
+                               current_afm_state.approach_initial_position);
+    if (current_steps - current_afm_state.approach_last_stored_step >= current_afm_state.approach_step_size) {
+        current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
+            current_steps,
+            current_afm_state.adc_0_val,
+            current_afm_state.motors[current_afm_state.approach_motor - 1].current_position
+        };
+        current_afm_state.approach_last_stored_step = current_steps;
+    }
+
+    current_afm_state.approach_last_update = current_time;
+}
+
+// ============================================================================
 // JSON Response Functions
 // ============================================================================
 
@@ -598,6 +702,70 @@ String processCommand(const String &json_command) {
             response["message"] = "Invalid PID action";
         }
     }
+    else if (strcmp(command, "approach") == 0) {
+        if (doc["action"] == "start") {
+            const auto &motor_param = doc["motor"];
+            const auto &step_size_param = doc["step_size"];
+            const auto &threshold_param = doc["threshold"];
+            const auto &max_steps_param = doc["max_steps"];
+            const auto &speed_param = doc["speed"];
+
+            if (!motor_param.is<int>() || !step_size_param.is<int>() || !threshold_param.is<int>()) {
+                response["status"] = "error";
+                response["message"] = "Missing required parameters (motor, step_size, threshold)";
+            }
+            else if (motor_param.as<int>() < 1 || motor_param.as<int>() > 3) {
+                response["status"] = "error";
+                response["message"] = "Invalid motor number (must be 1-3)";
+            }
+            else if (step_size_param.as<int>() == 0) {
+                response["status"] = "error";
+                response["message"] = "Step size cannot be zero";
+            }
+            else if (threshold_param.as<int>() <= 0) {
+                response["status"] = "error";
+                response["message"] = "Threshold must be positive";
+            }
+            else {
+                unsigned int speed = speed_param.is<int>() ? speed_param.as<int>() : 500;
+                speed = constrain(speed, 100, 5000); // Limit speed between 100 and 5000 microseconds
+                
+                if (startApproach(motor_param.as<int>(), step_size_param.as<int>(), 
+                                threshold_param.as<int>(), max_steps_param.as<int>(), speed)) {
+                    response["status"] = "started";
+                    response["motor"] = motor_param.as<int>();
+                    response["step_size"] = step_size_param.as<int>();
+                    response["threshold"] = threshold_param.as<int>();
+                    response["speed"] = speed;
+                    response["max_steps"] = max_steps_param.as<int>();
+                }
+                else {
+                    response["status"] = "error";
+                    response["message"] = "Failed to start approach";
+                }
+            }
+        }
+        else if (doc["action"] == "stop") {
+            stopApproach();
+            response["status"] = "stopped";
+        }
+        else if (doc["action"] == "get_data") {
+            response["status"] = "success";
+            JsonArray data = response["data"].to<JsonArray>();
+            for (int i = 0; i < current_afm_state.approach_data_count; i++) {
+                JsonObject obj = data.add<JsonObject>();
+                obj["steps"] = current_afm_state.approach_data[i].steps;
+                obj["adc"] = current_afm_state.approach_data[i].adc;
+                obj["position"] = current_afm_state.approach_data[i].position;
+            }
+            // Clear the data after sending
+            current_afm_state.approach_data_count = 0;
+        }
+        else {
+            response["status"] = "error";
+            response["message"] = "Invalid approach action";
+        }
+    }
     else {
         response["status"] = "error";
         response["message"] = "Unknown command";
@@ -623,6 +791,7 @@ void controlTask(void *parameter) {
         updateMotorMovement();
         updateAFMState();
         updatePIDControl();
+        updateApproach();
         esp_task_wdt_reset();
         vTaskDelayUntil(&last_wake_time, period);
     }

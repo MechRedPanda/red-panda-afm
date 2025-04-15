@@ -121,11 +121,8 @@ class ApproachWidget(QMainWindow, Ui_ApproachWidget):
 
         # Set default values
         self.motor_number.setValue(1)  # Default to motor 1
-        self.step_size.setText("1000")
-        self.max_steps.setText("500000")
-        self.adc_channel.addItem("ADC 0")
-        self.adc_channel.addItem("ADC 1")
-        self.adc_channel.setCurrentIndex(0)  # Default to ADC 0
+        self.step_size.setText("100")
+        self.max_steps.setText("500000")  # Positive for forward direction
         self.threshold.setText("10")
 
         # Connect buttons
@@ -141,8 +138,8 @@ class ApproachWidget(QMainWindow, Ui_ApproachWidget):
         self.timer.start(100)  # Update every 100ms
 
         # Data storage for plotting
-        self.steps_data = []
-        self.adc_data = []
+        self.approach_data = []  # Store all approach data points
+        self.initial_adc = None  # Store initial ADC value for threshold lines
 
     def setup_plot(self):
         """Initialize the plot widget."""
@@ -166,91 +163,98 @@ class ApproachWidget(QMainWindow, Ui_ApproachWidget):
     def start_approach(self):
         """Start the approach procedure."""
         if not self.afm.is_connected():
-            print("AFM not connected")
+            QMessageBox.warning(self, "Not Connected", "Please connect to AFM first")
             return
 
         if self.afm.is_approach_running():
-            print("Approach already running")
+            QMessageBox.warning(self, "Already Running", "Approach is already running")
             return
 
-        # Get parameters from UI
-        motor = self.motor_number.value()
-        step_size = int(self.step_size.text())
-        max_steps = int(self.max_steps.text()
-                        ) if self.max_steps.text() else None
-        adc_channel = self.adc_channel.currentIndex()  # 0 or 1
-        threshold = int(self.threshold.text())
+        try:
+            # Get parameters from UI
+            motor = self.motor_number.value()
+            step_size = int(self.step_size.text())
+            max_steps = int(self.max_steps.text())
+            threshold = int(self.threshold.text())
 
-        # Get initial status
-        status = self.afm.get_status()
-        if not status:
-            print("Failed to get initial status")
-            return
+            # Validate step_size (must be positive)
+            if step_size <= 0:
+                QMessageBox.warning(self, "Invalid Input", "Step size must be positive")
+                return
 
-        # Store initial values
-        initial_position = getattr(status, f"motor_{motor}").position
-        initial_adc = status.adc_0 if adc_channel == 0 else status.adc_1
+            # Clear previous data
+            self.approach_data = []
+            self.initial_adc = None
 
-        # Clear previous data
-        self.steps_data = []
-        self.adc_data = []
+            # Start approach
+            self.approaching_button.setChecked(True)
+            success = self.afm.approach(
+                motor=motor,
+                step_size=step_size,
+                threshold=threshold,
+                max_steps=max_steps
+            )
 
-        # Plot threshold lines
-        upper_thresh = initial_adc + threshold
-        lower_thresh = initial_adc - threshold
-        self.threshold_line_upper.setData([0, max_steps if max_steps else 10],
-                                          [upper_thresh, upper_thresh])
-        self.threshold_line_lower.setData([0, max_steps if max_steps else 10],
-                                          [lower_thresh, lower_thresh])
+            if not success:
+                self.approaching_button.setChecked(False)
+                QMessageBox.warning(self, "Error", "Failed to start approach")
 
-        # Start approach
-        self.approaching_button.setChecked(True)
-        success = self.afm.approach(
-            motor=motor,
-            step_size=step_size,
-            adc_channel=adc_channel,
-            threshold=threshold,
-            max_steps=max_steps,
-            polling_interval=0.05
-        )
-
-        if not success:
+        except ValueError as e:
             self.approaching_button.setChecked(False)
-            print("Failed to start approach")
+            QMessageBox.warning(self, "Invalid Input", str(e))
 
     def stop_approach(self):
         """Stop the approach procedure."""
-        print("Stopping approach")
-        self.afm.stop_approach()
-        self.approaching_button.setChecked(False)
+        if not self.afm.is_connected():
+            return
+
+        if not self.afm.is_approach_running():
+            return
+
+        success = self.afm.stop_approach()
+        if success:
+            self.approaching_button.setChecked(False)
+        else:
+            QMessageBox.warning(self, "Error", "Failed to stop approach")
 
     def update_display(self):
         """Update the display with current approach status."""
-        if self.afm.approach_data:
-            # Extract steps and ADC values from the stored data
-            steps_data = [point['steps'] for point in self.afm.approach_data]
-            adc_data = [point['adc'] for point in self.afm.approach_data]
-            if len(steps_data) > 1:
-                # Update plot with the stored data
-                self.adc_plot.setData(steps_data, adc_data)
+        if not self.afm.is_connected():
+            return
 
-                # Update threshold lines to match the data range
-                if len(steps_data) > 0:
-                    # Get initial ADC value for threshold lines
-                    initial_adc = adc_data[0]
-                    threshold = int(self.threshold.text())
-                    upper_thresh = initial_adc + threshold
-                    lower_thresh = initial_adc - threshold
+        # Get approach data from AFM
+        if self.afm.is_approach_running():
+            new_data = self.afm.get_approach_data()
+            if new_data:
+                # Append new data to our history
+                self.approach_data.extend(new_data)
 
-                    # Set threshold lines to span the same range as the data
-                    self.threshold_line_upper.setData([steps_data[0], steps_data[-1]],
-                                                      [upper_thresh, upper_thresh])
-                    self.threshold_line_lower.setData([steps_data[0], steps_data[-1]],
-                                                      [lower_thresh, lower_thresh])
+                # Store initial ADC value if we don't have it yet
+                if self.initial_adc is None and len(new_data) > 0:
+                    self.initial_adc = new_data[0]['adc']
 
-        else:
-            if self.approaching_button.isChecked():
-                self.approaching_button.setChecked(False)
+                # Extract steps and ADC values from all data
+                steps_data = [point['steps'] for point in self.approach_data]
+                adc_data = [point['adc'] for point in self.approach_data]
+
+                if len(steps_data) > 1:
+                    # Update plot with all data
+                    self.adc_plot.setData(steps_data, adc_data)
+
+                    # Update threshold lines if we have initial ADC value
+                    if self.initial_adc is not None:
+                        threshold = int(self.threshold.text())
+                        upper_thresh = self.initial_adc + threshold
+                        lower_thresh = self.initial_adc - threshold
+
+                        # Set threshold lines to span the same range as the data
+                        self.threshold_line_upper.setData([steps_data[0], steps_data[-1]],
+                                                        [upper_thresh, upper_thresh])
+                        self.threshold_line_lower.setData([steps_data[0], steps_data[-1]],
+                                                        [lower_thresh, lower_thresh])
+
+        # Update button state based on approach status
+        self.approaching_button.setChecked(self.afm.is_approach_running())
 
 
 class MainWindow(QMainWindow, Ui_MainWindow):
