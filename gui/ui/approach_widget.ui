@@ -16,7 +16,7 @@
   <widget class="PlotWidget" name="approach_plot_widget" native="true">
    <property name="geometry">
     <rect>
-     <x>20</x>
+     <x>50</x>
      <y>30</y>
      <width>751</width>
      <height>421</height>
@@ -97,6 +97,16 @@
        <number>-1</number>
       </property>
      </widget>
+    </item>
+    <item row="2" column="0">
+     <widget class="QLabel" name="label_3">
+      <property name="text">
+       <string>StepSpeed (uS)</string>
+      </property>
+     </widget>
+    </item>
+    <item row="2" column="1">
+     <widget class="QLineEdit" name="step_delay_input"/>
     </item>
    </layout>
   </widget>

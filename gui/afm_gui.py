@@ -8,6 +8,9 @@ from afm import AFM, AFMState
 from ui.focus_widget import Ui_FocusWidget
 from ui.main_window import Ui_MainWindow
 from ui.approach_widget import Ui_ApproachWidget
+from ui.scan_widget import Ui_ApproachWidget as Ui_ScanWidget
+import numpy as np
+from pyqtgraph import ImageView
 
 
 class FocusWidget(QMainWindow, Ui_FocusWidget):
@@ -111,6 +114,15 @@ class FocusWidget(QMainWindow, Ui_FocusWidget):
                         "No optimal focus point could be determined."
                     )
 
+    def closeEvent(self, event):
+        """Ensure timer is stopped when the window closes."""
+        print("Stopping FocusWidget timer...")
+        self.timer.stop()
+        # Optionally stop AFM focus operation if it's running
+        if self.afm.is_focus_running():
+             self.afm.stop_focus()
+        super().closeEvent(event) # Accept the close event
+
 
 # Assuming you have a corresponding UI file
 class ApproachWidget(QMainWindow, Ui_ApproachWidget):
@@ -124,6 +136,12 @@ class ApproachWidget(QMainWindow, Ui_ApproachWidget):
         self.step_size.setText("100")
         self.max_steps.setText("500000")  # Positive for forward direction
         self.threshold.setText("10")
+        self.step_delay_input.setText("250")  # Set default step delay (speed)
+
+        # Set up input validation for step delay
+        step_delay_validator = QIntValidator()
+        step_delay_validator.setBottom(1) # Ensure delay is at least 1us
+        self.step_delay_input.setValidator(step_delay_validator)
 
         # Connect buttons
         self.start_approach_button.clicked.connect(self.start_approach)
@@ -176,23 +194,30 @@ class ApproachWidget(QMainWindow, Ui_ApproachWidget):
             step_size = int(self.step_size.text())
             max_steps = int(self.max_steps.text())
             threshold = int(self.threshold.text())
+            speed = int(self.step_delay_input.text()) # Read speed from step_delay_input
 
             # Validate step_size (must be positive)
             if step_size <= 0:
                 QMessageBox.warning(self, "Invalid Input", "Step size must be positive")
                 return
 
+            # Validate speed (must be positive)
+            if speed <= 0:
+                QMessageBox.warning(self, "Invalid Input", "Step Speed (uS) must be positive")
+                return
+
             # Clear previous data
             self.approach_data = []
             self.initial_adc = None
 
-            # Start approach
+            # Start approach - Now passing speed directly
             self.approaching_button.setChecked(True)
             success = self.afm.approach(
                 motor=motor,
                 step_size=step_size,
                 threshold=threshold,
-                max_steps=max_steps
+                max_steps=max_steps,
+                speed=speed # Pass speed parameter
             )
 
             if not success:
@@ -256,6 +281,219 @@ class ApproachWidget(QMainWindow, Ui_ApproachWidget):
         # Update button state based on approach status
         self.approaching_button.setChecked(self.afm.is_approach_running())
 
+    def closeEvent(self, event):
+        """Ensure timer is stopped and approach is halted when the window closes."""
+        print("Stopping ApproachWidget timer...")
+        self.timer.stop()
+        # Optionally stop AFM approach operation if it's running
+        if self.afm.is_approach_running():
+            print("Stopping active approach...")
+            self.afm.stop_approach()
+        super().closeEvent(event) # Accept the close event
+
+
+class ScanWidget(QMainWindow, Ui_ScanWidget):
+    def __init__(self, afm: AFM):
+        super().__init__()
+        self.setupUi(self)
+        self.afm = afm
+
+        # --- UI Setup ---
+        # Scan parameters defaults
+        self.x_start_input.setText("10000")
+        self.x_end_input.setText("55000")
+        self.y_start_input.setText("10000")
+        self.y_end_input.setText("55000")
+        self.scan_resolution_input.setText("128")
+        self.dwell_time_input.setText("2")
+
+        # Scan progress (Removed - No progress bar in UI)
+        # self.scan_progress_bar.setMinimum(0)
+        # self.scan_progress_bar.setMaximum(100)
+        # self.scan_progress_bar.setValue(0)
+
+        # Setup ImageView - Assuming scan_plot_widget is a QWidget container
+        # Replace scan_plot_widget with an ImageView instance
+        # --- ImageView code commented out for testing --- 
+        # self.scan_image_view = ImageView(parent=self) # Set parent to the ScanWidget itself
+        # # Position/size the ImageView manually or add to a main layout later if needed
+        # # For now, let's place it reasonably, assuming the controls are on the left
+        # self.scan_image_view.setGeometry(QtCore.QRect(200, 20, 600, 600)) # Example position/size
+
+        # # Layout management for the ImageView within the container (Removed)
+        # # layout = QVBoxLayout(self.scan_plot_widget)
+        # # layout.setContentsMargins(0, 0, 0, 0)
+        # # layout.addWidget(self.scan_image_view)
+        # # self.scan_plot_widget.setLayout(layout)
+
+        # # Customize ImageView appearance (optional)
+        # self.scan_image_view.ui.histogram.hide()
+        # self.scan_image_view.getView().setAspectLocked(True)
+        # self.scan_image_view.getView().invertY(False) # Adjust as needed
+        # --- End of commented out ImageView code ---
+
+        # Connect buttons
+        self.start_scan_button.clicked.connect(self.start_scan)
+        self.stop_scan_button.clicked.connect(self.stop_scan_wrapper)
+
+        # Timer for updating the display
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_display)
+        self.timer.start(100)  # Update every 100ms
+
+        # Internal state
+        self.last_scan_data_count = 0
+        self.total_scan_points = 0
+
+    def start_scan(self):
+        """Start the scan procedure."""
+        if not self.afm.is_connected():
+            QMessageBox.warning(self, "Not Connected", "Please connect to AFM first")
+            return
+
+        if self.afm.is_scan_running():
+            QMessageBox.warning(self, "Already Running", "Scan is already running")
+            return
+
+        try:
+            # Get parameters from UI
+            x_start = int(self.x_start_input.text())
+            x_end = int(self.x_end_input.text())
+            y_start = int(self.y_start_input.text())
+            y_end = int(self.y_end_input.text())
+            resolution = int(self.scan_resolution_input.text())
+            dwell_time = int(self.dwell_time_input.text())
+
+            # Validation (moved from AFM class, good practice for GUI)
+            if not all(0 <= v <= 65535 for v in [x_start, x_end, y_start, y_end]):
+                QMessageBox.warning(self, "Invalid Input", "DAC coordinates must be between 0 and 65535")
+                return
+            if x_start > x_end or y_start > y_end:
+                QMessageBox.warning(self, "Invalid Input", "Start coordinates must be less than or equal to End coordinates")
+                return
+            if resolution < 2:
+                QMessageBox.warning(self, "Invalid Input", "Resolution must be at least 2")
+                return
+            if dwell_time < 0:
+                QMessageBox.warning(self, "Invalid Input", "Dwell time must be non-negative")
+                return
+
+            # --- Prepare for new scan --- 
+            # self.scan_progress_bar.setValue(0) # Removed
+            self.last_scan_data_count = 0
+            self.total_scan_points = resolution * resolution
+            # self.scan_image_view.clear() # Clear previous image - Commented out
+            self.scanning_button.setChecked(True)
+
+            # Start scan in AFM class
+            success = self.afm.start_scan(
+                x_start=x_start,
+                x_end=x_end,
+                y_start=y_start,
+                y_end=y_end,
+                resolution=resolution,
+                dwell_time=dwell_time
+            )
+
+            if not success:
+                self.scanning_button.setChecked(False)
+                # self.scan_progress_bar.setValue(0) # Removed
+                self.total_scan_points = 0
+                QMessageBox.warning(self, "Error", "Failed to start scan (check AFM state or connection)")
+
+        except ValueError:
+            self.scanning_button.setChecked(False)
+            QMessageBox.warning(self, "Invalid Input", "Please enter valid integer values for scan parameters.")
+
+    def stop_scan_wrapper(self):
+        """Wrapper to stop the scan procedure."""
+        if not self.afm.is_connected():
+            return
+
+        if not self.afm.is_scan_running():
+            # If not running according to AFM, ensure button is unchecked
+            self.scanning_button.setChecked(False)
+            return
+
+        # Attempt to stop
+        print("GUI: Attempting to stop scan...")
+        success = self.afm.stop_scan()
+        
+        # Update UI regardless of success, AFM class manages internal state
+        self.scanning_button.setChecked(False) 
+        if not success:
+            QMessageBox.warning(self, "Stop Scan", "Sent stop command, but confirmation failed or hardware issue suspected.")
+        else:
+            print("GUI: Scan stop confirmed or initiated.")
+        # Reset progress bar after stop is acknowledged or attempted
+        # self.scan_progress_bar.setValue(0) # Removed
+        # Consider leaving the last image displayed or clearing it:
+        # self.scan_image_view.clear()
+
+    def update_display(self):
+        """Update the display with current scan status and image (push model)."""
+        if not self.afm.is_connected():
+            # If disconnected, ensure UI reflects stopped state
+            if self.scanning_button.isChecked():
+                self.scanning_button.setChecked(False)
+            # self.scan_progress_bar.setValue(0) # Removed
+            return
+        
+        is_running = self.afm.is_scan_running()
+        self.scanning_button.setChecked(is_running)
+
+        if not is_running:
+            # Scan finished or was stopped
+            # Optionally ensure progress bar shows 100% if completed, 0 if stopped early
+            if self.last_scan_data_count >= self.total_scan_points and self.total_scan_points > 0:
+                 pass # self.scan_progress_bar.setValue(100) # Removed
+            # else: # Scan stopped before completion
+            #     self.scan_progress_bar.setValue(0) # Already set by stop_scan_wrapper
+            return # Nothing more to update if not running
+        
+        # --- Scan is running --- 
+        current_data_count = self.afm.get_scan_data_count()
+        print(f"GUI: Current data count: {current_data_count}")
+        
+        # Update progress bar
+        if self.total_scan_points > 0:
+            progress = int((current_data_count / self.total_scan_points) * 100)
+            # self.scan_progress_bar.setValue(progress) # Removed
+        else:
+             # Should not happen if start_scan was successful
+             # self.scan_progress_bar.setValue(0) # Removed
+             pass # Added pass to fix indentation error
+
+        # Check if new data has arrived
+        if current_data_count > self.last_scan_data_count:
+            # print(f"GUI: New data detected ({current_data_count} > {self.last_scan_data_count}). Updating image.") # Debug
+            image = self.afm.get_scan_image() # Default channel_index=2 (ADC0)
+            if image is not None:
+                try:
+                    # Transpose image because pyqtgraph ImageView expects (row, col)
+                    # but AFM likely provides (x, y) which maps to (col, row)
+                    # self.scan_image_view.setImage(image.T, autoLevels=True, autoRange=True) # Commented out
+                    pass # Added pass as block cannot be empty
+                except Exception as e:
+                    print(f"Error setting image in ImageView: {e}")
+            
+            self.last_scan_data_count = current_data_count
+
+        # Optional: Periodically sync status from hardware?
+        # The background reader *should* keep the state updated, so this might be redundant
+        # Uncomment if state seems to get out of sync.
+        # if time.monotonic() % 5 < 0.1: # Check status every ~5 seconds
+        #     self.afm.get_scan_data() # This just syncs status now
+
+    def closeEvent(self, event):
+        """Ensure timer is stopped and scan is stopped when window closes."""
+        print("Stopping ScanWidget timer...")
+        self.timer.stop()
+        if self.afm.is_scan_running():
+             print("Scan is running, stopping it...")
+             self.stop_scan_wrapper()
+        super().closeEvent(event) # Accept the close event
+
 
 class MainWindow(QMainWindow, Ui_MainWindow):
     def __init__(self):
@@ -288,6 +526,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         self.focus_widget_button.clicked.connect(self.open_focus_widget)
         self.approach_widget_button.clicked.connect(self.open_approach_widget)
+        self.scan_widget_button.clicked.connect(self.open_scan_widget)
 
         # Connect target ADC value input
         self.target_adc_value_input.editingFinished.connect(self.on_target_adc_changed)
@@ -876,6 +1115,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         """Opens the approach widget."""
         self.approach_widget = ApproachWidget(self.afm)
         self.approach_widget.show()
+
+    def open_scan_widget(self):
+        """Opens the scan widget."""
+        self.scan_widget = ScanWidget(self.afm)
+        self.scan_widget.show()
 
     def restore_afm(self):
         """Restore AFM to default settings."""
