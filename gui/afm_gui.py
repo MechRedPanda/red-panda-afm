@@ -11,6 +11,8 @@ from ui.approach_widget import Ui_ApproachWidget
 from ui.scan_widget import Ui_ApproachWidget as Ui_ScanWidget
 import numpy as np
 from pyqtgraph import ImageView
+from datetime import datetime
+import traceback
 
 
 class FocusWidget(QMainWindow, Ui_FocusWidget):
@@ -299,38 +301,46 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
         self.afm = afm
 
         # --- UI Setup ---
-        # Scan parameters defaults
+        # Scan parameters defaults (already handled by setupUi if defaults set in Qt Designer)
         self.x_start_input.setText("10000")
         self.x_end_input.setText("55000")
         self.y_start_input.setText("10000")
         self.y_end_input.setText("55000")
-        self.scan_resolution_input.setText("128")
-        self.dwell_time_input.setText("2")
+        self.scan_resolution_input.setText("4")
+        self.dwell_time_input.setText("20")
 
-        # Scan progress (Removed - No progress bar in UI)
-        # self.scan_progress_bar.setMinimum(0)
-        # self.scan_progress_bar.setMaximum(100)
-        # self.scan_progress_bar.setValue(0)
+        # --- Initialize Plots and Images ---
+        # Titles and labels for the plots created by setupUi
+        self.adc_0_plot_curve.setTitle("ADC0 Last Line", color="b", size="10pt")
+        self.adc_0_plot_curve.setLabel('left', 'ADC0 Value')
+        self.adc_0_plot_curve.setLabel('bottom', 'Pixel Index')
+        self.adc_0_plot_curve.showGrid(x=True, y=True)
+        self.adc_0_line_plot = self.adc_0_plot_curve.plot(pen=pg.mkPen('b', width=2), name="Trace") # Create plot item
+        self.adc_0_retrace_plot = self.adc_0_plot_curve.plot(pen=pg.mkPen('r', width=2, style=Qt.PenStyle.DashLine), name="Retrace") # Add retrace plot
 
-        # Setup ImageView - Assuming scan_plot_widget is a QWidget container
-        # Replace scan_plot_widget with an ImageView instance
-        # --- ImageView code commented out for testing --- 
-        # self.scan_image_view = ImageView(parent=self) # Set parent to the ScanWidget itself
-        # # Position/size the ImageView manually or add to a main layout later if needed
-        # # For now, let's place it reasonably, assuming the controls are on the left
-        # self.scan_image_view.setGeometry(QtCore.QRect(200, 20, 600, 600)) # Example position/size
+        self.dac_z_plot_curve.setTitle("DAC Z Last Line", color="g", size="10pt")
+        self.dac_z_plot_curve.setLabel('left', 'DAC Z Value')
+        self.dac_z_plot_curve.setLabel('bottom', 'Pixel Index')
+        self.dac_z_plot_curve.showGrid(x=True, y=True)
+        self.dac_z_line_plot = self.dac_z_plot_curve.plot(pen=pg.mkPen('g', width=2), name="Trace") # Create plot item
+        self.dac_z_retrace_plot = self.dac_z_plot_curve.plot(pen=pg.mkPen('r', width=2, style=Qt.PenStyle.DashLine), name="Retrace") # Add retrace plot
 
-        # # Layout management for the ImageView within the container (Removed)
-        # # layout = QVBoxLayout(self.scan_plot_widget)
-        # # layout.setContentsMargins(0, 0, 0, 0)
-        # # layout.addWidget(self.scan_image_view)
-        # # self.scan_plot_widget.setLayout(layout)
+        # Customize ImageView appearance (optional) - applied to instances from setupUi
+        self.adc_0_scan_image.ui.histogram.hide()
+        self.adc_0_scan_image.ui.roiBtn.hide()
+        self.adc_0_scan_image.ui.menuBtn.hide()
+        self.adc_0_scan_image.getView().setAspectLocked(True)
+        self.adc_0_scan_image.getView().invertY(False) # Adjust as needed
+        # ImageView doesn't have getPlotItem() - use a label above it instead
+        # Add a title to the parent layout or container if needed
 
-        # # Customize ImageView appearance (optional)
-        # self.scan_image_view.ui.histogram.hide()
-        # self.scan_image_view.getView().setAspectLocked(True)
-        # self.scan_image_view.getView().invertY(False) # Adjust as needed
-        # --- End of commented out ImageView code ---
+        self.dac_z_scan_image.ui.histogram.hide()
+        self.dac_z_scan_image.ui.roiBtn.hide()
+        self.dac_z_scan_image.ui.menuBtn.hide()
+        self.dac_z_scan_image.getView().setAspectLocked(True)
+        self.dac_z_scan_image.getView().invertY(False) # Adjust as needed
+        # ImageView doesn't have getPlotItem() - use a label above it instead
+        # --- End Plot/Image Init ---
 
         # Connect buttons
         self.start_scan_button.clicked.connect(self.start_scan)
@@ -339,11 +349,12 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
         # Timer for updating the display
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_display)
-        self.timer.start(100)  # Update every 100ms
+        self.timer.start(100) # Start timer conditionally or based on connection? Start later.
 
         # Internal state
         self.last_scan_data_count = 0
         self.total_scan_points = 0
+        self.current_resolution = 0 # Store resolution used for scan
 
     def start_scan(self):
         """Start the scan procedure."""
@@ -368,22 +379,27 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
             if not all(0 <= v <= 65535 for v in [x_start, x_end, y_start, y_end]):
                 QMessageBox.warning(self, "Invalid Input", "DAC coordinates must be between 0 and 65535")
                 return
-            if x_start > x_end or y_start > y_end:
-                QMessageBox.warning(self, "Invalid Input", "Start coordinates must be less than or equal to End coordinates")
+            # Allow start == end for single line scans? Maybe not for 2D.
+            if x_start >= x_end or y_start >= y_end:
+                QMessageBox.warning(self, "Invalid Input", "Start coordinates must be less than End coordinates")
                 return
             if resolution < 2:
                 QMessageBox.warning(self, "Invalid Input", "Resolution must be at least 2")
                 return
-            if dwell_time < 0:
+            if dwell_time < 0: # Should be positive? Or allow 0? Let's assume >= 0
                 QMessageBox.warning(self, "Invalid Input", "Dwell time must be non-negative")
                 return
 
-            # --- Prepare for new scan --- 
-            # self.scan_progress_bar.setValue(0) # Removed
+            # --- Prepare for new scan ---
             self.last_scan_data_count = 0
             self.total_scan_points = resolution * resolution
-            # self.scan_image_view.clear() # Clear previous image - Commented out
+            self.current_resolution = resolution # Store for plot updates
+            self.adc_0_scan_image.clear() # Clear previous image
+            self.dac_z_scan_image.clear() # Clear previous image
+            self.adc_0_line_plot.clear() # Clear previous line plot
+            self.dac_z_line_plot.clear() # Clear previous line plot
             self.scanning_button.setChecked(True)
+            self.timer.start(100) # Start update timer only when scan starts
 
             # Start scan in AFM class
             success = self.afm.start_scan(
@@ -397,17 +413,24 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
 
             if not success:
                 self.scanning_button.setChecked(False)
-                # self.scan_progress_bar.setValue(0) # Removed
                 self.total_scan_points = 0
+                self.current_resolution = 0
+                self.timer.stop() # Stop timer if scan fails to start
                 QMessageBox.warning(self, "Error", "Failed to start scan (check AFM state or connection)")
 
         except ValueError:
             self.scanning_button.setChecked(False)
+            self.timer.stop() # Stop timer on invalid input
             QMessageBox.warning(self, "Invalid Input", "Please enter valid integer values for scan parameters.")
 
     def stop_scan_wrapper(self):
         """Wrapper to stop the scan procedure."""
+        # Stop the timer first to prevent updates during/after stop
+        self.timer.stop()
+        print("GUI: Stopping update timer.")
+
         if not self.afm.is_connected():
+            self.scanning_button.setChecked(False) # Ensure UI consistency
             return
 
         if not self.afm.is_scan_running():
@@ -418,80 +441,108 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
         # Attempt to stop
         print("GUI: Attempting to stop scan...")
         success = self.afm.stop_scan()
-        
+
         # Update UI regardless of success, AFM class manages internal state
-        self.scanning_button.setChecked(False) 
+        self.scanning_button.setChecked(False)
         if not success:
             QMessageBox.warning(self, "Stop Scan", "Sent stop command, but confirmation failed or hardware issue suspected.")
         else:
             print("GUI: Scan stop confirmed or initiated.")
-        # Reset progress bar after stop is acknowledged or attempted
-        # self.scan_progress_bar.setValue(0) # Removed
-        # Consider leaving the last image displayed or clearing it:
-        # self.scan_image_view.clear()
+        # Leave the last image/plot displayed
 
     def update_display(self):
         """Update the display with current scan status and image (push model)."""
-        if not self.afm.is_connected():
-            # If disconnected, ensure UI reflects stopped state
-            if self.scanning_button.isChecked():
-                self.scanning_button.setChecked(False)
-            # self.scan_progress_bar.setValue(0) # Removed
-            return
+        # Get current scan status and data summary
+        scan_summary = self.afm.get_scan_data_summary()
         
-        is_running = self.afm.is_scan_running()
-        self.scanning_button.setChecked(is_running)
-
-        if not is_running:
-            # Scan finished or was stopped
-            # Optionally ensure progress bar shows 100% if completed, 0 if stopped early
-            if self.last_scan_data_count >= self.total_scan_points and self.total_scan_points > 0:
-                 pass # self.scan_progress_bar.setValue(100) # Removed
-            # else: # Scan stopped before completion
-            #     self.scan_progress_bar.setValue(0) # Already set by stop_scan_wrapper
-            return # Nothing more to update if not running
-        
-        # --- Scan is running --- 
-        current_data_count = self.afm.get_scan_data_count()
-        print(f"GUI: Current data count: {current_data_count}")
-        
-        # Update progress bar
-        if self.total_scan_points > 0:
-            progress = int((current_data_count / self.total_scan_points) * 100)
-            # self.scan_progress_bar.setValue(progress) # Removed
-        else:
-             # Should not happen if start_scan was successful
-             # self.scan_progress_bar.setValue(0) # Removed
-             pass # Added pass to fix indentation error
-
-        # Check if new data has arrived
-        if current_data_count > self.last_scan_data_count:
-            # print(f"GUI: New data detected ({current_data_count} > {self.last_scan_data_count}). Updating image.") # Debug
-            image = self.afm.get_scan_image() # Default channel_index=2 (ADC0)
-            if image is not None:
-                try:
-                    # Transpose image because pyqtgraph ImageView expects (row, col)
-                    # but AFM likely provides (x, y) which maps to (col, row)
-                    # self.scan_image_view.setImage(image.T, autoLevels=True, autoRange=True) # Commented out
-                    pass # Added pass as block cannot be empty
-                except Exception as e:
-                    print(f"Error setting image in ImageView: {e}")
+        # Check if scan data counts have changed since last update
+        if not hasattr(self, '_last_trace_count'):
+            self._last_trace_count = 0
+            self._last_retrace_count = 0
+            # Define the colormap once using CET-L17 reversed
+            # pos = np.linspace(0.0, 1.0, 3)
+            # color = np.array([[255, 0, 0, 255], [255, 165, 0, 255], [255, 255, 0, 255]], dtype=np.ubyte) # Red, Orange, Yellow
+            # self.autumn_cmap = pg.ColorMap(pos, color)
+            # self.autumn_lut = self.autumn_cmap.getLookupTable(0.0, 1.0, 256)
+            self.scan_cmap = pg.colormap.get('CET-L17') # Get the CET-L17 colormap
+            self.scan_cmap.reverse()                   # Reverse it
+            self.scan_lut = self.scan_cmap.getLookupTable(0.0, 1.0, 256) # Get the LUT
             
-            self.last_scan_data_count = current_data_count
-
-        # Optional: Periodically sync status from hardware?
-        # The background reader *should* keep the state updated, so this might be redundant
-        # Uncomment if state seems to get out of sync.
-        # if time.monotonic() % 5 < 0.1: # Check status every ~5 seconds
-        #     self.afm.get_scan_data() # This just syncs status now
+        trace_count = scan_summary["trace_count"]
+        retrace_count = scan_summary["retrace_count"]
+        
+        # Only update if counts have changed
+        if trace_count == self._last_trace_count and retrace_count == self._last_retrace_count:
+            return
+            
+        # Update last counts
+        self._last_trace_count = trace_count
+        self._last_retrace_count = retrace_count
+        
+        # Clear previous images before updating - clearing might not be needed if setImage replaces
+        # self.adc_0_scan_image.clear()
+        # self.dac_z_scan_image.clear()
+        
+        # Get and update images
+        try:
+            # Get trace image for ADC0
+            adc_image = self.afm.get_scan_image(channel_index=0, scan_type="trace")
+            if adc_image is not None and adc_image.size > 0:
+                # Use np.nanmin/max to handle potential NaNs
+                min_val, max_val = np.nanmin(adc_image), np.nanmax(adc_image)
+                # Set image data and levels on ImageView
+                self.adc_0_scan_image.setImage(adc_image, levels=(min_val, max_val))
+                # Apply the LUT to the underlying ImageItem
+                self.adc_0_scan_image.getImageItem().setLookupTable(self.scan_lut)
+                
+            # Get trace image for DACZ (Channel 1 in binary data, index 3 overall)
+            # Assuming DACZ corresponds to channel_index=1 in get_scan_image based on unpacking
+            # The get_scan_image extracts data[:, channel_index + 2], so ADC0 is index 0, DACZ is index 1
+            dac_image = self.afm.get_scan_image(channel_index=1, scan_type="trace") 
+            if dac_image is not None and dac_image.size > 0:
+                min_val, max_val = np.nanmin(dac_image), np.nanmax(dac_image)
+                # Set image data and levels on ImageView
+                self.dac_z_scan_image.setImage(dac_image, levels=(min_val, max_val))
+                # Apply the LUT to the underlying ImageItem
+                self.dac_z_scan_image.getImageItem().setLookupTable(self.scan_lut)
+                
+            # --- Update Line Plots (Optional - Keep or Remove) ---
+            # Example: Update line plot for the last line of ADC0 data
+            # This requires extracting the last line from the raw data if needed
+            # For simplicity, this part is omitted unless specifically requested
+            # resolution = scan_summary.get("resolution", 0)
+            # if resolution > 0 and trace_count >= resolution:
+            #     last_line_data = # Logic to get last full line data from self.afm.scan_data_trace
+            #     self.adc_0_line_plot.setData(np.arange(resolution), last_line_data[:, 2]) # Plot ADC0
+            # Similarly for dac_z_line_plot if desired
+            
+            # Update progress
+            total_points = scan_summary["total_expected"]
+            if total_points > 0:
+                progress = (trace_count + retrace_count) / total_points * 100
+                # Optionally update a progress bar widget here
+                print(f"Progress: {progress:.1f}%") 
+                
+            # Update status label or button
+            self.scanning_button.setChecked(scan_summary.get("is_running", False))
+            if not scan_summary.get("is_running", False):
+                self.timer.stop() # Stop timer if scan finished
+                print(f"Scan finished or stopped. Final State: {scan_summary['scan_state']}")
+            else:
+                print(f"Status: {scan_summary['scan_state']}") # Print status while running
+            
+        except Exception as e:
+            print(f"Error updating display: {e}")
+            traceback.print_exc()
 
     def closeEvent(self, event):
         """Ensure timer is stopped and scan is stopped when window closes."""
         print("Stopping ScanWidget timer...")
         self.timer.stop()
         if self.afm.is_scan_running():
-             print("Scan is running, stopping it...")
-             self.stop_scan_wrapper()
+             print("Scan is running, attempting to stop it...")
+             # Directly call stop_scan, wrapper might have UI interactions undesirable on close
+             self.afm.stop_scan()
         super().closeEvent(event) # Accept the close event
 
 
@@ -549,13 +600,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.d_input_box.setValidator(pid_validator)
 
         # Set default values
-        self.p_input_box.setText("1.0")
-        self.i_input_box.setText("0.1")
+        self.p_input_box.setText("10.0")
+        self.i_input_box.setText("1.0")
         self.d_input_box.setText("0.0")
 
         # Connect signals
         self.pid_toggle_button.stateChanged.connect(self.toggle_pid)
         self.pid_reverse_button.stateChanged.connect(self.toggle_pid_reverse)
+        # Connect the refresh button
+        self.pid_refresh_button.clicked.connect(self.refresh_pid_parameters)
 
         # Add status update timer
         self.pid_status_timer = QTimer(self)
@@ -665,6 +718,33 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         except Exception as e:
             print(f"Error updating PID status: {str(e)}")
+
+    def refresh_pid_parameters(self):
+        """Send the current PID parameter values from the GUI to the AFM, without enabling/disabling."""
+        if not self.afm.is_connected():
+            QMessageBox.warning(self, "Not Connected", "Please connect to AFM first")
+            return
+
+        try:
+            kp = float(self.p_input_box.text())
+            ki = float(self.i_input_box.text())
+            kd = float(self.d_input_box.text())
+            invert = self.pid_reverse_button.isChecked()
+
+            print(f"Refreshing PID parameters: kp={kp}, ki={ki}, kd={kd}, invert={invert}")
+            success = self.afm.set_pid_parameters(kp=kp, ki=ki, kd=kd, invert=invert)
+
+            if success:
+                print("PID parameters sent successfully.")
+                # Optional: Provide visual feedback (e.g., status bar message)
+                self.statusbar.showMessage("PID parameters refreshed.", 2000) # Show for 2 seconds
+            else:
+                QMessageBox.warning(self, "PID Error", "Failed to send PID parameters to AFM.")
+
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter valid numbers for PID parameters.")
+        except Exception as e:
+            QMessageBox.warning(self, "PID Error", f"Failed to refresh PID parameters: {str(e)}")
 
     def setup_plots(self):
         self.adc_plot_widget.setTitle(

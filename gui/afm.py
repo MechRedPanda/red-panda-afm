@@ -10,6 +10,8 @@ from typing import Dict, Optional, Union, List, Tuple, Any
 from dataclasses import dataclass, field
 import numpy as np
 import queue # Added for response queue
+import csv
+import struct # Needed for unpacking binary data
 
 # Default serial port settings
 DEFAULT_PORT = None  # Will auto-detect if None
@@ -18,6 +20,7 @@ TIMEOUT = 1
 QUEUE_MAXLEN = 10000
 SERIAL_READ_TIMEOUT = 0.1 # Timeout for serial read attempts in background thread
 RESPONSE_TIMEOUT = 2.0 # Default timeout for waiting for a command response
+SCAN_SEND_CHUNK_SIZE = 32 # Matches firmware setting for max points per binary chunk
 
 
 class AFMState(Enum):
@@ -57,6 +60,11 @@ class AFMStatus:
     # System state
     state: AFMState = AFMState.IDLE
 
+    # Control loop timing (from firmware)
+    loop_last_period_us: int = 0
+    loop_last_freq_hz: float = 0.0
+    loop_avg_freq_hz: float = 0.0
+
 
 class AFM:
     """Main class for controlling the Atomic Force Microscope system."""
@@ -84,10 +92,21 @@ class AFM:
         self.response_queue = queue.Queue()
         self._read_thread = None
         self._stop_read_thread = threading.Event()
-        self.scan_data = deque() # Use deque for thread-safe appends
+        
+        # Modified for separate trace/retrace storage
+        self.scan_data_trace = deque()  # Store trace (first pass) scan data
+        self.scan_data_retrace = deque()  # Store retrace (second pass) scan data
+        self.scan_data = deque()  # Maintain original for backward compatibility
+        
         self.scan_running = False
-        self._scan_event = threading.Event() # Added for potential future use
-        self.scan_resolution = 0 # Store resolution of the current/last scan
+        self._scan_event = threading.Event()  # Added for potential future use
+        self.scan_resolution = 0  # Store resolution of the current/last scan
+        
+        # Initialize scan boundary attributes
+        self.scan_x_start = 0
+        self.scan_x_end = 0
+        self.scan_y_start = 0
+        self.scan_y_end = 0
 
     # Serial Communication Methods
     def get_serial_ports(self) -> List[Any]:
@@ -207,116 +226,119 @@ class AFM:
             print(f"Error receiving response from queue: {e}")
             return None
 
-    # --- Background Serial Reader Thread --- 
+    # --- Background Serial Reader Thread (Modified for Binary Data) ---
     def _serial_read_loop(self):
-        """Background thread to continuously read serial data."""
-        print("Serial reader thread started.")
-        buffer = ""
-        reading_scan_data = False
-        points_to_read = 0
-        scan_active_flag = False
+        """Background thread to continuously read serial data (JSON, CSV, Text)."""
+        print("Serial reader thread started (CSV Scan Data Mode).")
+        # Removed binary format definitions
+        read_buffer = b''
 
         while not self._stop_read_thread.is_set():
-            line = None
             try:
                 if self.serial_conn and self.serial_conn.is_open:
-                    # Use a short timeout for readline to keep the loop responsive
-                    # and allow checking the stop event regularly.
-                    # Reading is blocking, so lock is needed.
                     with self.serial_lock:
-                         # Check if bytes are available before blocking read
-                        if self.serial_conn.in_waiting > 0:
-                             line_bytes = self.serial_conn.readline()
-                             if line_bytes:
-                                 line = line_bytes.decode("utf-8", errors="ignore").strip()
+                        data_to_read = self.serial_conn.in_waiting
+                        if data_to_read > 0:
+                             read_buffer += self.serial_conn.read(data_to_read)
                         else:
-                             # No data immediately available, yield to prevent busy-wait
-                             time.sleep(0.01)
+                             time.sleep(0.005)
+                             continue
                 else:
-                    # Connection closed externally
                     print("Reader thread: Connection lost.")
-                    break # Exit thread if connection is closed
-
+                    break
             except serial.SerialException as e:
                 print(f"Reader thread: Serial error: {e}")
-                self.close() # Attempt to close gracefully
-                break # Exit thread on serial error
+                self.close()
+                break
             except Exception as e:
-                print(f"Reader thread: Unexpected error reading line: {e}")
-                time.sleep(0.1) # Avoid tight loop on unexpected error
+                print(f"Reader thread: Unexpected error reading serial: {e}")
+                time.sleep(0.1)
                 continue
 
-            if line is None:
-                continue # No line read, loop again
-            # --- Process Line --- 
-            try:
-                if reading_scan_data:
-                    # Currently reading CSV data points after header
-                    parts = line.split(',')
-                    if len(parts) == 4:
+            processed_bytes = 0
+            buffer_len = len(read_buffer)
+
+            while processed_bytes < buffer_len:
+                # --- Check for newline-terminated lines ---
+                newline_pos = read_buffer.find(b'\n', processed_bytes)
+                if newline_pos != -1:
+                    line_bytes = read_buffer[processed_bytes : newline_pos]
+                    processed_bytes = newline_pos + 1
+
+                    try:
+                        line_str = line_bytes.decode('utf-8').strip()
+                        if not line_str:
+                            continue
+
+                        # --- Check line type ---
+                        
+                        # 1. Try parsing as CSV scan data (heuristic: starts with digit, has 4 commas)
+                        if line_str and line_str[0].isdigit() and line_str.count(',') == 4:
+                            try:
+                                parts = line_str.split(',')
+                                if len(parts) == 5:
+                                    # Convert to integers
+                                    point_data = [int(p) for p in parts]
+                                    x, y, adc0, dacz, flags = point_data
+                                    
+                                    # Store data
+                                    self.scan_data.append(point_data)
+                                    is_retrace = (flags == 2) # Check retrace flag
+                                    if is_retrace:
+                                        self.scan_data_retrace.append(point_data)
+                                    else:
+                                        self.scan_data_trace.append(point_data)
+                                    continue # Handled as CSV scan data
+                                else:
+                                     # Malformed CSV, fall through to other checks
+                                     pass 
+                            except ValueError:
+                                # Conversion to int failed, not valid scan data, fall through
+                                pass
+                            except Exception as csv_e:
+                                print(f"Reader thread: Error processing potential CSV: {csv_e} - Line: {line_str}")
+                                continue # Skip malformed potential CSV
+
+                        # 2. Try parsing as JSON
                         try:
-                            point_data = [int(p) for p in parts]
-                            self.scan_data.append(point_data)
-                            points_to_read -= 1
-                        except ValueError:
-                            print(f"Reader thread: Warning - Malformed CSV data skipped: {line}")
-                    else:
-                        print(f"Reader thread: Warning - Unexpected line format during scan data read: {line}")
-                        # Potentially reset state if format is wrong?
-                    
-                    if points_to_read <= 0:
-                        reading_scan_data = False
-                        # Check the active flag received in the header
-                        if not scan_active_flag and self.scan_running:
-                            print("Reader thread: Scan reported inactive by ESP32.")
-                            self.scan_running = False
-                            # Transition state if needed (do this carefully outside lock)
-                            if self.current_state == AFMState.SCANNING:
-                                 self.set_idle() # Reset state and busy flag
+                            json_data = json.loads(line_str)
 
-                    print(len(self.scan_data))
-
-                elif line.startswith("# SCAN_DATA_CSV"):
-                    # Detected scan data header
-                    parts = line.split(',')
-                    try:
-                        points_str = parts[1].split(':')[1].strip()
-                        active_str = parts[2].split(':')[1].strip()
-                        points_to_read = int(points_str)
-                        scan_active_flag = (int(active_str) == 1)
-                        if points_to_read > 0:
-                            reading_scan_data = True
-                            print(f"Reader thread: Receiving {points_to_read} scan points (active: {scan_active_flag})...") # Debug
-                        else:
-                             # Header indicates 0 points, check active flag immediately
-                            if not scan_active_flag and self.scan_running:
-                                print("Reader thread: Scan reported inactive by ESP32 (0 points).")
+                            # Special case: Scan completion message
+                            if json_data.get("command") == "scan" and json_data.get("status") == "complete":
+                                print("Reader thread: Received scan completion message!")
                                 self.scan_running = False
-                                if self.current_state == AFMState.SCANNING:
-                                     self.set_idle()
+                                self.current_state = AFMState.IDLE 
+                                self.set_idle() 
+                                continue # Handled scan complete message
 
-                    except (IndexError, ValueError) as e:
-                        print(f"Reader thread: Error parsing scan header ", line, ":", e)
-                        reading_scan_data = False # Reset state on parse error
-                        points_to_read = 0
+                            # Other valid JSON -> response queue
+                            else:
+                                self.response_queue.put(json_data)
+                                continue # Queued JSON response
 
-                elif line.startswith("{") and line.endswith("}"):
-                    # Looks like a JSON response
-                    try:
-                        json_response = json.loads(line)
-                        self.response_queue.put(json_response)
-                        # print(f"Reader thread: Queued response: {json_response}") # Debug
-                    except json.JSONDecodeError:
-                        print(f"Reader thread: Warning - JSON decode error for line: {line}")
-                
-                # Optional: Handle other types of messages if needed
-                # elif line.startswith("# LOG:"): print(f"ESP32 LOG: {line[6:]}")
+                        except json.JSONDecodeError:
+                            # Not JSON: Treat as debug/unrecognized text
+                            if line_str.startswith("# DEBUG:"):
+                                print(f"Reader thread: Debug msg: {line_str[8:]}")
+                            else:
+                                print(f"Reader thread: Unrecognized text line (not CSV or JSON): {line_str}")
+                            continue # Handled as text
 
-            except Exception as e:
-                print(f"Reader thread: Error processing line ", line, ":", e)
-                # Reset scan reading state on error to be safe
-                reading_scan_data = False
-                points_to_read = 0
+                    except UnicodeDecodeError:
+                        print(f"Reader thread: Could not decode bytes as UTF-8: {line_bytes}")
+                        continue
+                    except Exception as e:
+                         print(f"Reader thread: Error processing line: {e} - Line: {line_bytes}")
+                         continue
+
+                # --- No newline found in buffer --- 
+                else:
+                    # Need more data to complete a line or potential binary block (which we now ignore)
+                    break # Break inner loop to read more data
+
+            # Update buffer by removing processed bytes
+            if processed_bytes > 0:
+                read_buffer = read_buffer[processed_bytes:]
 
         print("Serial reader thread finished.")
 
@@ -352,6 +374,9 @@ class AFM:
             self.scan_running = False # If becoming idle, scan must be stopped
             self.focus_running = False
             # We assume approach state is managed by its own start/stop/get_data logic
+            
+            # We intentionally don't reset scan boundaries (scan_x_start, scan_x_end, etc.)
+            # here to allow image retrieval after a scan has completed
 
     def is_busy(self) -> bool:
         """Check if AFM is busy."""
@@ -359,29 +384,29 @@ class AFM:
             return self.busy
 
     def get_status(self) -> Optional[AFMStatus]:
-        """Get current status from AFM device."""
+        """Get current status from AFM device by sending command and parsing response."""
         response = self.send_and_receive(
             {"command": "get_status"}, timeout=2.0)
-        if response:
+        if response and isinstance(response, dict):
             try:
-                # Check for all required fields
+                # --- Parsing logic moved here from _serial_read_loop ---
                 required_fields = [
                     "timestamp", "adc_0", "adc_1", "dac_f", "dac_t", "dac_x", "dac_y", "dac_z",
                     "motor_1", "motor_2", "motor_3", "state"
                 ]
-                for field in required_fields:
-                    if field not in response:
-                        print(f"Missing required field in status response: {field}")
-                        return None
+                if not all(field in response for field in required_fields):
+                    print(f"Missing required field in status response: {response}")
+                    return None
 
                 # Check motor data structure
                 for motor_num in [1, 2, 3]:
                     motor_data = response.get(f"motor_{motor_num}", {})
                     if not all(key in motor_data for key in ["position", "target", "is_running"]):
-                        print(f"Missing required motor data for motor {motor_num}")
+                        print(f"Missing required motor data in status for motor {motor_num}: {response}")
                         return None
 
                 def get_motor_data(num: int) -> Dict:
+                    # Helper to safely get motor data, defaulting to empty dict
                     return response.get(f"motor_{num}", {})
 
                 status = AFMStatus(
@@ -408,16 +433,26 @@ class AFM:
                         target=int(get_motor_data(3).get("target", 0)),
                         is_running=bool(get_motor_data(3).get("is_running", False))
                     ),
-                    state=AFMState(response.get("state", "IDLE"))
+                    state=AFMState(response.get("state", "IDLE")),
+                    # Parse new timing fields (period and frequencies)
+                    loop_last_period_us=int(response.get("loop_last_period_us", 0)),
+                    loop_last_freq_hz=float(response.get("loop_last_freq_hz", 0.0)),
+                    loop_avg_freq_hz=float(response.get("loop_avg_freq_hz", 0.0))
                 )
+                # --- End of moved parsing logic ---
 
-                self.status_queue.append(status)
-                self.current_state = status.state
+                self.status_queue.append(status) # Keep history in status_queue
+                self.current_state = status.state # Update AFM's internal state
+
+                print(f"Status: {status.loop_avg_freq_hz:.2f} Hz") # Updated print
                 return status
 
             except Exception as e:
-                print(f"Error parsing AFM status: {e}")
-                print(f"Raw response: {response}")
+                print(f"Error parsing AFM status JSON in get_status: {e}")
+                print(f"Raw response dictionary: {response}")
+        elif response:
+            # Handle cases where send_and_receive might return non-dict data (shouldn't happen with current loop)
+            print(f"Received non-dictionary response for get_status: {response}")
 
         return None
 
@@ -584,7 +619,8 @@ class AFM:
             steps = range(start, end + direction, direction * step_size)
 
             try:
-                self.set_state(AFMState.FOCUSING)
+                # Directly update the state attribute
+                self.current_state = AFMState.FOCUSING 
 
                 # Ramp to initial position and wait
                 if not self.ramp_dac("F", start, step_size=100, delay_ms=10):
@@ -1010,11 +1046,20 @@ class AFM:
         if not self.set_busy():
              print("Could not acquire busy lock for scan.")
              return False
+        
+        time.sleep(2) # Wait for the AFM to be ready
 
         try:
             # Clear previous scan data and set parameters
             self.scan_data.clear()
+            self.scan_data_trace.clear()  # Clear trace data
+            self.scan_data_retrace.clear()  # Clear retrace data
             self.scan_resolution = resolution
+            # Store scan boundaries for image reconstruction
+            self.scan_x_start = x_start
+            self.scan_x_end = x_end
+            self.scan_y_start = y_start
+            self.scan_y_end = y_end
             # Optimistically set state, confirmed by ESP32 later
             self.current_state = AFMState.SCANNING
             self.scan_running = True
@@ -1040,6 +1085,11 @@ class AFM:
                 print(f"Failed to start scan. Response: {response}")
                 self.scan_resolution = 0 # Reset resolution on failure
                 self.scan_running = False
+                # Reset scan boundaries on failure
+                self.scan_x_start = 0
+                self.scan_x_end = 0
+                self.scan_y_start = 0
+                self.scan_y_end = 0
                 self.set_idle() # Release busy lock and reset internal state
                 return False
 
@@ -1047,6 +1097,11 @@ class AFM:
             print(f"Error starting scan: {e}")
             self.scan_resolution = 0 # Reset resolution on error
             self.scan_running = False
+            # Reset scan boundaries on error
+            self.scan_x_start = 0
+            self.scan_x_end = 0
+            self.scan_y_start = 0
+            self.scan_y_end = 0
             if self.busy:
                 self.set_idle() # Ensure cleanup on error
             return False
@@ -1089,6 +1144,7 @@ class AFM:
 
             if response and response.get("status") == "stopped":
                 print("Scan stop confirmed by hardware.")
+                # We don't reset scan boundaries here to allow getting scan images after stopping
                 return True
             else:
                 print("Stop scan command sent, but hardware confirmation failed or was negative.")
@@ -1108,75 +1164,172 @@ class AFM:
         # which is updated by start/stop calls and the background reader/status updates.
         return self.scan_running
 
-    def get_scan_image(self, channel_index=2) -> Optional[np.ndarray]: # Default to ADC0 (index 2 in CSV) 
-        """Reconstructs the 2D scan image from the collected scan_data.
-
-        Args:
-            channel_index (int): The index within each data point list/tuple
-                                 to use for the image pixel value (e.g., 0 for ADC0,
-                                 1 for DACZ, etc., based on ESP32 data format).
-                                 Defaults to 2 (index of adc0 in pushed CSV data x,y,adc0,dacz).
-
-        Returns:
-            Optional[np.ndarray]: A 2D numpy array representing the scan image,
-                                  or None if no data/resolution is available.
-        """
-        if not self.scan_data or self.scan_resolution <= 0:
-            return None
+    def get_scan_image(self, channel_index=0, scan_type="trace", save_raw=False):
+        """Get scan image data for a specific channel and scan type.
         
-        # Access deque safely (though appends/pops are thread-safe, iteration isn't guaranteed)
-        # Create a temporary list copy for stable iteration if needed, 
-        # but for visualization, accessing the deque directly might be acceptable 
-        # if updates are infrequent or minor artifacts are tolerable.
-        # For simplicity here, we iterate directly. Consider locking or copying if issues arise.
-        # with self.serial_lock: # Or a dedicated scan_data_lock
-        #    local_scan_data = list(self.scan_data)
-        local_scan_data = list(self.scan_data) # Create copy for safe iteration
-
-        if not local_scan_data:
-             return None
-
-        # Initialize image array (use float for visualization flexibility)
-        image = np.full((self.scan_resolution, self.scan_resolution), np.nan, dtype=np.float32)
-
-        # Reconstruct image from flattened data
-        flat_image_data = []
-        for point_data in local_scan_data:
-            # Check if point_data is a list/tuple and has enough elements
-            if isinstance(point_data, (list, tuple)) and len(point_data) > channel_index:
-                try:
-                    flat_image_data.append(float(point_data[channel_index]))
-                except (ValueError, TypeError):
-                    flat_image_data.append(np.nan) # Use NaN on conversion error
-            else:
-                flat_image_data.append(np.nan) # Use NaN if data format issue or missing index
-
-        # Ensure we don't exceed array bounds and fill the numpy array
-        num_elements = min(len(flat_image_data), image.size)
-        image.flat[:num_elements] = flat_image_data[:num_elements]
-
-        # Return the reconstructed image (GUI will handle transposition)
+        Args:
+            channel_index (int): Index of the channel to get image for (0-3)
+            scan_type (str): "trace" or "retrace"
+            save_raw (bool): If True, save raw data to CSV files
+            
+        Returns:
+            numpy.ndarray: 2D array of image data
+        """
+        if not self.scan_data:
+            return None
+            
+        # Get data for the specified scan type
+        if scan_type == "trace":
+            data = list(self.scan_data_trace)
+        elif scan_type == "retrace":
+            data = list(self.scan_data_retrace)
+        else:
+            print(f"Invalid scan type: {scan_type}")
+            return None
+            
+        if not data:
+            return None
+            
+        # Convert to numpy array for easier processing
+        data = np.array(data)
+        
+        # Extract coordinates and channel data
+        x_coords = data[:, 0]
+        y_coords = data[:, 1]
+        channel_data = data[:, channel_index + 2]  # +2 to skip x,y coordinates
+        
+        # Get scan parameters
+        x_start = self.scan_x_start
+        x_end = self.scan_x_end
+        y_start = self.scan_y_start
+        y_end = self.scan_y_end
+        resolution = self.scan_resolution
+        
+        # Calculate pixel coordinates using rounding
+        x_pixels = np.round((x_coords - x_start) / (x_end - x_start) * (resolution - 1)).astype(int)
+        y_pixels = np.round((y_coords - y_start) / (y_end - y_start) * (resolution - 1)).astype(int)
+        
+        # Create image array
+        image = np.full((resolution, resolution), np.nan)
+        
+        # Track duplicate points
+        duplicate_points = {}
+        valid_points = 0
+        
+        # Fill image with data
+        for i in range(len(data)):
+            x, y = x_pixels[i], y_pixels[i]
+            if 0 <= x < resolution and 0 <= y < resolution:
+                key = (x, y)
+                if key in duplicate_points:
+                    duplicate_points[key].append((x_coords[i], y_coords[i], channel_data[i]))
+                else:
+                    duplicate_points[key] = [(x_coords[i], y_coords[i], channel_data[i])]
+                image[y, x] = channel_data[i]
+                valid_points += 1
+        
+        # Print detailed debugging information
+        print(f"\nProcessing {len(data)} data points for {scan_type} image")
+        print(f"X range in data: {x_coords.min()} to {x_coords.max()}, Y range: {y_coords.min()} to {y_coords.max()}")
+        print(f"Image pixels - Valid: {valid_points}/{len(data)} ({valid_points/len(data)*100:.1f}%)")
+        print(f"Pixel mapping - Unique pixels: {len(duplicate_points)}, Duplicate mappings: {sum(len(v) > 1 for v in duplicate_points.values())}")
+        print(f"Max points per pixel: {max(len(v) for v in duplicate_points.values())}")
+        
+        # Print distribution of points per pixel
+        point_dist = {}
+        for points in duplicate_points.values():
+            count = len(points)
+            point_dist[count] = point_dist.get(count, 0) + 1
+        print(f"Points per pixel distribution: {point_dist}")
+        
+        # Print details of duplicate points
+        print("\nDuplicate points details:")
+        for pixel, points in duplicate_points.items():
+            if len(points) > 1:
+                print(f"\nPixel ({pixel[0]}, {pixel[1]}) has {len(points)} points:")
+                for i, (x, y, value) in enumerate(points):
+                    print(f"  Point {i+1}: X={x}, Y={y}, Value={value}")
+        
+        # Find missing pixels
+        missing_pixels = []
+        for y in range(resolution):
+            for x in range(resolution):
+                if np.isnan(image[y, x]):
+                    missing_pixels.append((x, y))
+        
+        
+        # Save raw data if requested
+        if save_raw:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"last_scan_{scan_type}_{timestamp}.csv"
+            with open(filename, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['X', 'Y', 'Channel0', 'Channel1', 'Channel2', 'Channel3'])
+                for row in data:
+                    writer.writerow(row)
+            print(f"Saved raw {scan_type} data to {filename}")
+        
         return image
 
-    def get_scan_data_count(self) -> int:
-        """Returns the number of scan data points currently stored."""
-        return len(self.scan_data)
+    def get_scan_data_count(self, scan_type="combined") -> int:
+        """Returns the number of scan data points currently stored.
+        
+        Args:
+            scan_type (str): Type of scan data to count - "trace", "retrace", or "combined"
+                            Defaults to "combined" for backward compatibility.
+        
+        Returns:
+            int: Number of data points in the specified collection
+        """
+        if scan_type == "trace":
+            count = len(self.scan_data_trace)
+            return count
+        elif scan_type == "retrace":
+            count = len(self.scan_data_retrace)
+            return count
+        else:  # "combined" or any other value
+            count = len(self.scan_data)
+            return count
+            
+    def get_scan_data_summary(self) -> Dict:
+        """Returns a summary of scan data counts and status.
+        
+        Returns:
+            Dict: Dictionary with counts of different scan data types and scan status
+        """
+        trace_count = len(self.scan_data_trace)
+        retrace_count = len(self.scan_data_retrace)
+        combined_count = len(self.scan_data)
+        
+        total_expected = self.scan_resolution**2 * 2 if self.scan_resolution > 0 else 0
+        
+        return {
+            "trace_count": trace_count,
+            "retrace_count": retrace_count,
+            "combined_count": combined_count,
+            "resolution": self.scan_resolution,
+            "total_expected": total_expected,
+            "is_running": self.scan_running,
+            "progress_percent": (combined_count / total_expected * 100) if total_expected > 0 else 0,
+            "scan_state": self.current_state.name
+        }
 
 
 if __name__ == "__main__":
     afm = AFM()
     # --- Example Usage (Push Model) --- 
-    if afm.connect():
+    port = afm.get_serial_ports()[0]
+    if afm.connect(port.device):
         try:
             # Example: Start a scan
             print("Starting scan...")
-            if afm.start_scan(x_start=10000, x_end=55000, y_start=10000, y_end=55000, resolution=16, dwell_time=5):
+            if afm.start_scan(x_start=10000, x_end=55000, y_start=10000, y_end=55000, resolution=128, dwell_time=2):
                 print("Scan initiated.")
                 # Monitor scan progress
                 while afm.is_scan_running():
                     # Optionally check status periodically (less critical with push)
                     # afm.get_scan_data() # Removed call
-                    print(f"Scan data points received: {afm.get_scan_data_count()} / {afm.scan_resolution**2}")
+                    print(f"Scan data points received: {afm.get_scan_data_count()} / {2*afm.scan_resolution**2}")
                     time.sleep(1) # Wait before checking again
                 print("Scan finished or stopped.")
                 print(f"Total points collected: {afm.get_scan_data_count()}")
@@ -1188,6 +1341,11 @@ if __name__ == "__main__":
             # Or just exit after scan.
             # print("Waiting for a bit...")
             # time.sleep(5)
+
+            # Get the scan image
+            print(len(afm.scan_data))
+            scan_image = afm.get_scan_image(channel_index=2, scan_type="trace")
+            print(f"Scan image shape: {scan_image.shape}")
 
         except KeyboardInterrupt:
             print("Stopping...")

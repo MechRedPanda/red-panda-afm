@@ -138,7 +138,7 @@
       <x>30</x>
       <y>620</y>
       <width>1131</width>
-      <height>121</height>
+      <height>141</height>
      </rect>
     </property>
     <layout class="QGridLayout" name="gridLayout_2" columnstretch="1,1,1,12">
@@ -510,13 +510,6 @@
      </rect>
     </property>
     <layout class="QGridLayout" name="gridLayout_3">
-     <item row="0" column="3">
-      <widget class="QLabel" name="label_9">
-       <property name="text">
-        <string>Reverse?</string>
-       </property>
-      </widget>
-     </item>
      <item row="0" column="0">
       <widget class="QLabel" name="label_6">
        <property name="text">
@@ -524,20 +517,10 @@
        </property>
       </widget>
      </item>
-     <item row="0" column="2">
-      <widget class="QLabel" name="label_8">
+     <item row="0" column="3">
+      <widget class="QLabel" name="label_9">
        <property name="text">
-        <string>D</string>
-       </property>
-      </widget>
-     </item>
-     <item row="1" column="0">
-      <widget class="QLineEdit" name="p_input_box"/>
-     </item>
-     <item row="0" column="1">
-      <widget class="QLabel" name="label_7">
-       <property name="text">
-        <string>I</string>
+        <string>Reverse?</string>
        </property>
       </widget>
      </item>
@@ -548,11 +531,35 @@
        </property>
       </widget>
      </item>
+     <item row="0" column="2">
+      <widget class="QLabel" name="label_8">
+       <property name="text">
+        <string>D</string>
+       </property>
+      </widget>
+     </item>
      <item row="1" column="2">
       <widget class="QLineEdit" name="d_input_box"/>
      </item>
+     <item row="0" column="1">
+      <widget class="QLabel" name="label_7">
+       <property name="text">
+        <string>I</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QLineEdit" name="p_input_box"/>
+     </item>
      <item row="1" column="1">
       <widget class="QLineEdit" name="i_input_box"/>
+     </item>
+     <item row="2" column="0">
+      <widget class="QPushButton" name="pid_refresh_button">
+       <property name="text">
+        <string>RefreshPID</string>
+       </property>
+      </widget>
      </item>
     </layout>
    </widget>
