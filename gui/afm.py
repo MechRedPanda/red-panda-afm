@@ -642,17 +642,16 @@ class AFM:
                         continue
                     time.sleep(0.01)  # Allow time for DAC to settle
 
-                    response = self.send_and_receive(
-                        {"command": "read_adc"},
-                        timeout=0.5
-                    )
-                    if response is None:
-                        continue
-                    if "adc_0" not in response or "adc_1" not in response:
-                        print(f"Missing required ADC data in focus response: {response}")
-                        continue
-                    adc_0 = int(response.get("adc_0", 0))
-                    adc_1 = int(response.get("adc_1", 0))
+                    # Use get_status() instead of read_adc command
+                    status = self.get_status() # get_status handles send/receive
+                    
+                    if status is None:
+                        print(f"Focus: Failed to get status for DAC value {dac_f_value}. Skipping.")
+                        continue # Skip this point if status failed
+
+                    # Extract ADC values from the status object
+                    adc_0 = status.adc_0
+                    adc_1 = status.adc_1
                     self.focus_results.append((dac_f_value, adc_0, adc_1))
 
             finally:

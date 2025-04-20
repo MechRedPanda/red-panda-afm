@@ -675,6 +675,46 @@ uint16_t calculateDacValue(uint16_t start, uint16_t end, uint16_t index, uint16_
 // Forward declaration for the helper function
 void sendScanDataBuffer();
 
+// Helper function to ramp DAC X and Y to target values
+void rampDacXY(uint16_t target_x, uint16_t target_y, int duration_ms = 50, int step_delay_ms = 1)
+{
+    uint16_t current_x = current_afm_state.dac_x_val;
+    uint16_t current_y = current_afm_state.dac_y_val;
+
+    // Ensure step delay is at least 1 to avoid division by zero
+    if (step_delay_ms < 1) step_delay_ms = 1;
+    const int num_steps = duration_ms / step_delay_ms;
+
+    if (num_steps > 0 && (current_x != target_x || current_y != target_y))
+    {
+        int32_t delta_x = target_x - current_x;
+        int32_t delta_y = target_y - current_y;
+
+        for (int i = 1; i <= num_steps; ++i)
+        {
+            // Calculate intermediate values using integer math
+            uint16_t next_x = current_x + (delta_x * i) / num_steps;
+            uint16_t next_y = current_y + (delta_y * i) / num_steps;
+
+            // Write intermediate values
+            dac_x.write(next_x);
+            dac_y.write(next_y);
+
+            // Update state immediately
+            current_afm_state.dac_x_val = next_x;
+            current_afm_state.dac_y_val = next_y;
+
+            delay(step_delay_ms);
+        }
+    }
+
+    // Ensure final position is set exactly
+    dac_x.write(target_x);
+    dac_y.write(target_y);
+    current_afm_state.dac_x_val = target_x;
+    current_afm_state.dac_y_val = target_y;
+}
+
 bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_end,
                uint16_t resolution, unsigned int dwell_time)
 {
@@ -706,16 +746,15 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
     current_afm_state.scan_active = true;
     current_afm_state.current_state = SystemState::SCANNING;
 
-    // Calculate and move to starting position (index 0, 0)
-    uint16_t initial_x = calculateDacValue(x_start, x_end, 0, resolution);
-    uint16_t initial_y = calculateDacValue(y_start, y_end, 0, resolution);
-    current_afm_state.scan_current_x = initial_x;
-    current_afm_state.scan_current_y = initial_y;
+    // --- Ramp from current position to start position ---
+    uint16_t target_x = calculateDacValue(x_start, x_end, 0, resolution);
+    uint16_t target_y = calculateDacValue(y_start, y_end, 0, resolution);
 
-    dac_x.write(initial_x);
-    dac_y.write(initial_y);
-    current_afm_state.dac_x_val = initial_x;
-    current_afm_state.dac_y_val = initial_y;
+    rampDacXY(target_x, target_y); // Use default ramp duration (50ms) and step (1ms)
+
+    // Update scan state variable after ramping is complete
+    current_afm_state.scan_current_x = target_x;
+    current_afm_state.scan_current_y = target_y;
 
     // Small delay to allow DACs to settle before the first point's dwell time starts
     delay(1);
