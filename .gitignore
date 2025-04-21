@@ -1,4 +1,21 @@
+# Byte-compiled / optimized files
+**/__pycache__/
+*.py[co]
+
+# Environments
+.venv/
+venv/
+env/
+.env
+
+# IDE / Editor Configuration
+.vscode/
+.idea/
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Project Specific
 cad/afm/*.3mf
-gui/__pycache__/*.pyc
-gui/ui/__pycache__/*.pyc
-data/*
+data/
