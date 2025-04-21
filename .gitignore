@@ -1,3 +1,4 @@
 cad/afm/*.3mf
 gui/__pycache__/*.pyc
 gui/ui/__pycache__/*.pyc
+data/*

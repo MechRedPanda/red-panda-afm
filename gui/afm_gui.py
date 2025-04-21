@@ -13,6 +13,7 @@ import numpy as np
 from pyqtgraph import ImageView
 from datetime import datetime
 import traceback
+import os
 
 
 class FocusWidget(QMainWindow, Ui_FocusWidget):
@@ -20,9 +21,9 @@ class FocusWidget(QMainWindow, Ui_FocusWidget):
         super().__init__()
         self.setupUi(self)
         self.afm = afm
-        self.f_start.setText("10000")
+        self.f_start.setText("37000")
         self.f_end.setText("50000")
-        self.step_size.setText("10")
+        self.step_size.setText("2")
         self.has_shown_results = False  # Flag to track if we've shown results
 
         self.start_focus_button.clicked.connect(self.start_focus)
@@ -302,12 +303,12 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
 
         # --- UI Setup ---
         # Scan parameters defaults (already handled by setupUi if defaults set in Qt Designer)
-        self.x_start_input.setText("10000")
-        self.x_end_input.setText("55000")
-        self.y_start_input.setText("10000")
-        self.y_end_input.setText("55000")
-        self.scan_resolution_input.setText("4")
-        self.dwell_time_input.setText("20")
+        self.x_start_input.setText("30000")
+        self.x_end_input.setText("35000")
+        self.y_start_input.setText("30000")
+        self.y_end_input.setText("35000")
+        self.scan_resolution_input.setText("128")
+        self.dwell_time_input.setText("2")
 
         # --- Initialize Plots and Images ---
         # Titles and labels for the plots created by setupUi
@@ -345,6 +346,7 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
         # Connect buttons
         self.start_scan_button.clicked.connect(self.start_scan)
         self.stop_scan_button.clicked.connect(self.stop_scan_wrapper)
+        self.save_data_button.clicked.connect(self.save_scan_data)
 
         # Timer for updating the display
         self.timer = QTimer(self)
@@ -355,6 +357,94 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
         self.last_scan_data_count = 0
         self.total_scan_points = 0
         self.current_resolution = 0 # Store resolution used for scan
+
+        # Create data directory if it doesn't exist
+        self.data_dir = "data"
+        if not os.path.exists(self.data_dir):
+            os.makedirs(self.data_dir)
+
+        # Initialize scan data tracking
+        self._last_trace_count = 0
+        self._last_retrace_count = 0
+
+    def generate_filename(self, scan_type: str, channel: str) -> str:
+        """Generate a filename for saving scan data.
+        
+        Args:
+            scan_type (str): "trace" or "retrace"
+            channel (str): "adc0" or "dacz"
+            
+        Returns:
+            str: Generated filename with path
+        """
+        # Get current timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Get resolution from current scan
+        resolution = self.afm.scan_resolution
+        
+        # Generate base filename
+        base_filename = f"{timestamp}_{scan_type}_{channel}_{resolution}x{resolution}.csv"
+        
+        # Combine with data directory
+        return os.path.join(self.data_dir, base_filename)
+
+    def save_scan_data(self):
+        """Save current scan data to CSV files."""
+        if not self.afm.scan_data:
+            QMessageBox.warning(self, "No Data", "No scan data available to save")
+            return
+
+        try:
+            # Get filename from input or generate default
+            filename = self.save_data_filename.text().strip()
+            if not filename:
+                # Generate default filenames for both trace and retrace
+                trace_adc_filename = self.generate_filename("trace", "adc0")
+                trace_dacz_filename = self.generate_filename("trace", "dacz")
+                retrace_adc_filename = self.generate_filename("retrace", "adc0")
+                retrace_dacz_filename = self.generate_filename("retrace", "dacz")
+            else:
+                # Use user-provided filename as base
+                base_path = os.path.join(self.data_dir, os.path.splitext(filename)[0])
+                trace_adc_filename = f"{base_path}_trace_adc0.csv"
+                trace_dacz_filename = f"{base_path}_trace_dacz.csv"
+                retrace_adc_filename = f"{base_path}_retrace_adc0.csv"
+                retrace_dacz_filename = f"{base_path}_retrace_dacz.csv"
+
+            # Export all combinations
+            success = True
+            if self.afm.export_csv(trace_adc_filename, scan_type="trace", channel="adc0"):
+                print(f"Saved trace ADC0 data to {trace_adc_filename}")
+            else:
+                success = False
+                print(f"Failed to save trace ADC0 data")
+
+            if self.afm.export_csv(trace_dacz_filename, scan_type="trace", channel="dacz"):
+                print(f"Saved trace DACZ data to {trace_dacz_filename}")
+            else:
+                success = False
+                print(f"Failed to save trace DACZ data")
+
+            if self.afm.export_csv(retrace_adc_filename, scan_type="retrace", channel="adc0"):
+                print(f"Saved retrace ADC0 data to {retrace_adc_filename}")
+            else:
+                success = False
+                print(f"Failed to save retrace ADC0 data")
+
+            if self.afm.export_csv(retrace_dacz_filename, scan_type="retrace", channel="dacz"):
+                print(f"Saved retrace DACZ data to {retrace_dacz_filename}")
+            else:
+                success = False
+                print(f"Failed to save retrace DACZ data")
+
+            if success:
+                QMessageBox.information(self, "Success", "Scan data saved successfully")
+            else:
+                QMessageBox.warning(self, "Partial Success", "Some scan data could not be saved")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error saving scan data: {str(e)}")
 
     def start_scan(self):
         """Start the scan procedure."""
@@ -451,89 +541,85 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
         # Leave the last image/plot displayed
 
     def update_display(self):
-        """Update the display with current scan status and image (push model)."""
-        # Get current scan status and data summary
-        scan_summary = self.afm.get_scan_data_summary()
-        
-        # Check if scan data counts have changed since last update
-        if not hasattr(self, '_last_trace_count'):
-            self._last_trace_count = 0
-            self._last_retrace_count = 0
-            # Define the colormap once using CET-L17 reversed
-            # pos = np.linspace(0.0, 1.0, 3)
-            # color = np.array([[255, 0, 0, 255], [255, 165, 0, 255], [255, 255, 0, 255]], dtype=np.ubyte) # Red, Orange, Yellow
-            # self.autumn_cmap = pg.ColorMap(pos, color)
-            # self.autumn_lut = self.autumn_cmap.getLookupTable(0.0, 1.0, 256)
-            self.scan_cmap = pg.colormap.get('CET-L17') # Get the CET-L17 colormap
-            self.scan_cmap.reverse()                   # Reverse it
-            self.scan_lut = self.scan_cmap.getLookupTable(0.0, 1.0, 256) # Get the LUT
-            
-        trace_count = scan_summary["trace_count"]
-        retrace_count = scan_summary["retrace_count"]
-        
-        # Only update if counts have changed
-        if trace_count == self._last_trace_count and retrace_count == self._last_retrace_count:
-            return
-            
-        # Update last counts
-        self._last_trace_count = trace_count
-        self._last_retrace_count = retrace_count
-        
-        # Clear previous images before updating - clearing might not be needed if setImage replaces
-        # self.adc_0_scan_image.clear()
-        # self.dac_z_scan_image.clear()
-        
-        # Get and update images
+        """Update the display with the latest scan data."""
         try:
-            # Get trace image for ADC0
-            adc_image = self.afm.get_scan_image(channel_index=0, scan_type="trace")
-            if adc_image is not None and adc_image.size > 0:
-                # Use np.nanmin/max to handle potential NaNs
-                min_val, max_val = np.nanmin(adc_image), np.nanmax(adc_image)
-                # Set image data and levels on ImageView
-                self.adc_0_scan_image.setImage(adc_image, levels=(min_val, max_val))
-                # Apply the LUT to the underlying ImageItem
-                self.adc_0_scan_image.getImageItem().setLookupTable(self.scan_lut)
-                
-            # Get trace image for DACZ (Channel 1 in binary data, index 3 overall)
-            # Assuming DACZ corresponds to channel_index=1 in get_scan_image based on unpacking
-            # The get_scan_image extracts data[:, channel_index + 2], so ADC0 is index 0, DACZ is index 1
-            dac_image = self.afm.get_scan_image(channel_index=1, scan_type="trace") 
-            if dac_image is not None and dac_image.size > 0:
-                min_val, max_val = np.nanmin(dac_image), np.nanmax(dac_image)
-                # Set image data and levels on ImageView
-                self.dac_z_scan_image.setImage(dac_image, levels=(min_val, max_val))
-                # Apply the LUT to the underlying ImageItem
-                self.dac_z_scan_image.getImageItem().setLookupTable(self.scan_lut)
-                
-            # --- Update Line Plots (Optional - Keep or Remove) ---
-            # Example: Update line plot for the last line of ADC0 data
-            # This requires extracting the last line from the raw data if needed
-            # For simplicity, this part is omitted unless specifically requested
-            # resolution = scan_summary.get("resolution", 0)
-            # if resolution > 0 and trace_count >= resolution:
-            #     last_line_data = # Logic to get last full line data from self.afm.scan_data_trace
-            #     self.adc_0_line_plot.setData(np.arange(resolution), last_line_data[:, 2]) # Plot ADC0
-            # Similarly for dac_z_line_plot if desired
+            # Get the current scan data counts
+            trace_count = self.afm.get_scan_data_count("trace")
+            retrace_count = self.afm.get_scan_data_count("retrace")
             
-            # Update progress
-            total_points = scan_summary["total_expected"]
-            if total_points > 0:
-                progress = (trace_count + retrace_count) / total_points * 100
-                # Optionally update a progress bar widget here
-                print(f"Progress: {progress:.1f}%") 
+            # Only update if we have new data
+            if trace_count == self._last_trace_count and retrace_count == self._last_retrace_count:
+                return
                 
-            # Update status label or button
-            self.scanning_button.setChecked(scan_summary.get("is_running", False))
-            if not scan_summary.get("is_running", False):
-                self.timer.stop() # Stop timer if scan finished
-                print(f"Scan finished or stopped. Final State: {scan_summary['scan_state']}")
-            else:
-                print(f"Status: {scan_summary['scan_state']}") # Print status while running
+            self._last_trace_count = trace_count
+            self._last_retrace_count = retrace_count
+            
+            # Get images for both channels
+            adc0_image = self.afm.get_scan_image(channel_index=0, scan_type="trace")
+            dacz_image = self.afm.get_scan_image(channel_index=1, scan_type="trace")
+            
+            if adc0_image is not None:
+                # Calculate min and max values, handling NaN values
+                valid_values = adc0_image[~np.isnan(adc0_image)]
+                if len(valid_values) > 0:
+                    min_val = np.min(valid_values)
+                    max_val = np.max(valid_values)
+                    # If all values are the same, add a small range
+                    if min_val == max_val:
+                        min_val -= 1
+                        max_val += 1
+                else:
+                    # If no valid values, use default range
+                    min_val = 0
+                    max_val = 1
+                self.adc_0_scan_image.setImage(adc0_image)
+                self.adc_0_scan_image.setLevels(min_val, max_val)
+                
+            if dacz_image is not None:
+                # Calculate min and max values, handling NaN values
+                valid_values = dacz_image[~np.isnan(dacz_image)]
+                if len(valid_values) > 0:
+                    min_val = np.min(valid_values)
+                    max_val = np.max(valid_values)
+                    # If all values are the same, add a small range
+                    if min_val == max_val:
+                        min_val -= 1
+                        max_val += 1
+                else:
+                    # If no valid values, use default range
+                    min_val = 0
+                    max_val = 1
+                self.dac_z_scan_image.setImage(dacz_image)
+                self.dac_z_scan_image.setLevels(min_val, max_val)
+                
+            # Clear all line plots before updating
+            self.adc_0_line_plot.clear()
+            self.dac_z_line_plot.clear()
+            self.adc_0_retrace_plot.clear()
+            self.dac_z_retrace_plot.clear()
+                
+            # Get the last complete line for both trace and retrace
+            last_trace_line = self.afm.get_scan_line(scan_type="trace")
+            last_retrace_line = self.afm.get_scan_line(scan_type="retrace")
+            
+            if last_trace_line is not None:
+                # Update ADC0 trace plot using raw y coordinates
+                self.adc_0_line_plot.setData(last_trace_line[:, 1], last_trace_line[:, 2], pen='b')
+                
+                # Update DACZ trace plot using raw y coordinates
+                self.dac_z_line_plot.setData(last_trace_line[:, 1], last_trace_line[:, 3], pen='g')
+                
+            if last_retrace_line is not None:
+                # Update ADC0 retrace plot using raw y coordinates
+                self.adc_0_retrace_plot.setData(last_retrace_line[:, 1], last_retrace_line[:, 2], pen='r', style='--')
+                
+                # Update DACZ retrace plot using raw y coordinates
+                self.dac_z_retrace_plot.setData(last_retrace_line[:, 1], last_retrace_line[:, 3], pen='r', style='--')
+                
             
         except Exception as e:
             print(f"Error updating display: {e}")
-            traceback.print_exc()
+            traceback.print_exc()  # Print full traceback for debugging
 
     def closeEvent(self, event):
         """Ensure timer is stopped and scan is stopped when window closes."""

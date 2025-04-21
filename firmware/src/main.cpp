@@ -189,6 +189,20 @@ struct AFMState
     uint32_t control_loop_last_period_us = 0; // Period of the last full loop iteration
     uint64_t control_loop_total_period_us = 0; // Use 64-bit to prevent quick overflow
     uint32_t control_loop_count = 0;        // Count for averaging period
+
+    // DAC XY Ramping State
+    bool ramp_active = false;
+    uint16_t ramp_target_x = 0;
+    uint16_t ramp_target_y = 0;
+    uint16_t ramp_start_x = 0;
+    uint16_t ramp_start_y = 0;
+    int32_t ramp_delta_x = 0;
+    int32_t ramp_delta_y = 0;
+    int ramp_duration_ms = 1000;     // Default duration
+    int ramp_step_delay_ms = 1;    // Default step delay
+    int ramp_total_steps = 0;
+    int ramp_current_step = 0;
+    uint64_t ramp_next_step_time_us = 0; // Use microsecond timer
 };
 
 // ============================================================================
@@ -675,55 +689,55 @@ uint16_t calculateDacValue(uint16_t start, uint16_t end, uint16_t index, uint16_
 // Forward declaration for the helper function
 void sendScanDataBuffer();
 
-// Helper function to ramp DAC X and Y to target values
-void rampDacXY(uint16_t target_x, uint16_t target_y, int duration_ms = 50, int step_delay_ms = 1)
-{
-    uint16_t current_x = current_afm_state.dac_x_val;
-    uint16_t current_y = current_afm_state.dac_y_val;
-
-    // Ensure step delay is at least 1 to avoid division by zero
-    if (step_delay_ms < 1) step_delay_ms = 1;
-    const int num_steps = duration_ms / step_delay_ms;
-
-    if (num_steps > 0 && (current_x != target_x || current_y != target_y))
-    {
-        int32_t delta_x = target_x - current_x;
-        int32_t delta_y = target_y - current_y;
-
-        for (int i = 1; i <= num_steps; ++i)
-        {
-            // Calculate intermediate values using integer math
-            uint16_t next_x = current_x + (delta_x * i) / num_steps;
-            uint16_t next_y = current_y + (delta_y * i) / num_steps;
-
-            // Write intermediate values
-            dac_x.write(next_x);
-            dac_y.write(next_y);
-
-            // Update state immediately
-            current_afm_state.dac_x_val = next_x;
-            current_afm_state.dac_y_val = next_y;
-
-            delay(step_delay_ms);
-        }
+// Function to update DAC ramping state machine
+void updateDacRamp() {
+    if (!current_afm_state.ramp_active) {
+        return;
     }
 
-    // Ensure final position is set exactly
-    dac_x.write(target_x);
-    dac_y.write(target_y);
-    current_afm_state.dac_x_val = target_x;
-    current_afm_state.dac_y_val = target_y;
+    uint64_t current_time_us = esp_timer_get_time();
+
+    if (current_time_us >= current_afm_state.ramp_next_step_time_us) {
+        // Increment step
+        current_afm_state.ramp_current_step++;
+
+        uint16_t next_x;
+        uint16_t next_y;
+
+        // Check if ramp is complete
+        if (current_afm_state.ramp_current_step >= current_afm_state.ramp_total_steps) {
+            next_x = current_afm_state.ramp_target_x;
+            next_y = current_afm_state.ramp_target_y;
+            current_afm_state.ramp_active = false; // Mark ramp as complete
+        } else {
+            // Calculate intermediate values using integer math
+             next_x = current_afm_state.ramp_start_x + (current_afm_state.ramp_delta_x * current_afm_state.ramp_current_step) / current_afm_state.ramp_total_steps;
+             next_y = current_afm_state.ramp_start_y + (current_afm_state.ramp_delta_y * current_afm_state.ramp_current_step) / current_afm_state.ramp_total_steps;
+        }
+
+        // Write values
+        dac_x.write(next_x);
+        dac_y.write(next_y);
+
+        // Update state immediately
+        current_afm_state.dac_x_val = next_x;
+        current_afm_state.dac_y_val = next_y;
+
+        // If ramp is still active, schedule next step
+        if (current_afm_state.ramp_active) {
+            current_afm_state.ramp_next_step_time_us = current_time_us + (uint64_t)current_afm_state.ramp_step_delay_ms * 1000;
+        }
+    }
 }
 
 bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_end,
                uint16_t resolution, unsigned int dwell_time)
 {
     // Basic validation
-    if (resolution < 2)
-        return false; // Need at least 2 points for a line/scan
-    if (x_start > x_end || y_start > y_end)
-        return false;
-    if (current_afm_state.scan_active || isMotorMoving() || current_afm_state.approach_running)
+    if (resolution < 2) return false;
+    if (x_start > x_end || y_start > y_end) return false;
+    // Prevent starting if already scanning, moving, approaching, OR RAMPING
+    if (current_afm_state.scan_active || isMotorMoving() || current_afm_state.approach_running || current_afm_state.ramp_active)
         return false;
 
     // Store parameters
@@ -734,30 +748,71 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
     current_afm_state.scan_resolution = resolution;
     current_afm_state.scan_dwell_time = dwell_time;
 
-    // Initialize state
+    // Initialize scan state variables (indices, direction, etc.)
     current_afm_state.scan_current_x_index = 0;
     current_afm_state.scan_current_y_index = 0;
-    current_afm_state.scan_y_forward = true;    // Always start with forward direction
-    current_afm_state.scan_return_line = false; // Initialize to false
-    current_afm_state.scan_buffer_head = 0;     // Initialize ring buffer
+    current_afm_state.scan_y_forward = true;
+    current_afm_state.scan_return_line = false;
+    current_afm_state.scan_buffer_head = 0;
     current_afm_state.scan_buffer_tail = 0;
     current_afm_state.scan_buffer_count = 0;
-    current_afm_state.scan_last_point_time = millis();
-    current_afm_state.scan_active = true;
-    current_afm_state.current_state = SystemState::SCANNING;
+    current_afm_state.scan_last_point_time = millis(); // Use millis for dwell time check
 
-    // --- Ramp from current position to start position ---
+    // Calculate target start position
     uint16_t target_x = calculateDacValue(x_start, x_end, 0, resolution);
     uint16_t target_y = calculateDacValue(y_start, y_end, 0, resolution);
 
-    rampDacXY(target_x, target_y); // Use default ramp duration (50ms) and step (1ms)
+    // Get current position
+    uint16_t current_x = current_afm_state.dac_x_val;
+    uint16_t current_y = current_afm_state.dac_y_val;
 
-    // Update scan state variable after ramping is complete
-    current_afm_state.scan_current_x = target_x;
+    // --- Initiate Ramp if needed ---
+    if (current_x != target_x || current_y != target_y) {
+        current_afm_state.ramp_target_x = target_x;
+        current_afm_state.ramp_target_y = target_y;
+        current_afm_state.ramp_start_x = current_x;
+        current_afm_state.ramp_start_y = current_y;
+        current_afm_state.ramp_delta_x = target_x - current_x;
+        current_afm_state.ramp_delta_y = target_y - current_y;
+        // Use default duration/step for now, could be made parameters later
+        current_afm_state.ramp_duration_ms = 1000;
+        current_afm_state.ramp_step_delay_ms = 1;
+        if (current_afm_state.ramp_step_delay_ms < 1) current_afm_state.ramp_step_delay_ms = 1; // Sanity check
+        current_afm_state.ramp_total_steps = current_afm_state.ramp_duration_ms / current_afm_state.ramp_step_delay_ms;
+
+        if (current_afm_state.ramp_total_steps > 0) {
+             current_afm_state.ramp_current_step = 0;
+             current_afm_state.ramp_next_step_time_us = esp_timer_get_time() + (uint64_t)current_afm_state.ramp_step_delay_ms * 1000;
+             current_afm_state.ramp_active = true;
+        } else {
+             // Duration or step too small, just jump
+             dac_x.write(target_x);
+             dac_y.write(target_y);
+             current_afm_state.dac_x_val = target_x;
+             current_afm_state.dac_y_val = target_y;
+             current_afm_state.ramp_active = false;
+        }
+
+    } else {
+        // Already at the target, no ramp needed
+        current_afm_state.ramp_active = false;
+        // Ensure state is correct even if no ramp occurred
+        current_afm_state.dac_x_val = target_x;
+        current_afm_state.dac_y_val = target_y;
+    }
+
+    // Update scan state variable *after* initiating ramp or jumping
+    current_afm_state.scan_current_x = target_x; // Scan logic uses this as the target/current scan position
     current_afm_state.scan_current_y = target_y;
 
-    // Small delay to allow DACs to settle before the first point's dwell time starts
-    delay(1);
+    // Mark scan as active (even if ramping)
+    current_afm_state.scan_active = true;
+    current_afm_state.current_state = SystemState::SCANNING;
+
+
+    // NOTE: No delay here anymore, scan starts logically,
+    // but actual movement might be delayed by ramp.
+    // First point acquisition in updateScan will wait for dwell time anyway.
 
     return true;
 }
@@ -766,6 +821,10 @@ void updateScan()
 {
     if (!current_afm_state.scan_active)
         return;
+    
+    if (current_afm_state.ramp_active) {
+        return;
+    }
 
     unsigned long current_time = millis();
     if (current_time - current_afm_state.scan_last_point_time < current_afm_state.scan_dwell_time)
@@ -1562,17 +1621,20 @@ void controlTask(void *parameter)
 
         // Perform control actions (Execution time of these does not affect frequency measurement)
         updateMotorMovement();
-        updateAFMState();
+        updateDacRamp(); // Add update for DAC ramping
         updatePIDControl();
         updateApproach();
         updateScan();
-
+        updateAFMState();
 
         if (++count == 1000) {
             // Occasionally yield or reset WDT
             count = 0;
             portYIELD(); // Or just yield CPU briefly
         }
+
+        // Reset the WDT after completing the work for this cycle
+        esp_task_wdt_reset();
     }
 }
 
