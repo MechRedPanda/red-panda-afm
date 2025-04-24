@@ -54,7 +54,7 @@ private:
   int8_t _cs;
   uint16_t _mode;
   SPIClass *_spi;
-  SPISettings _spi_settings = SPISettings(1000000, MSBFIRST, SPI_MODE2);
+  SPISettings _spi_settings = SPISettings(16000000, MSBFIRST, SPI_MODE2);
   byte _spi_buffer[3];
 };
 

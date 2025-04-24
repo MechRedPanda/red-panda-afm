@@ -43,28 +43,26 @@ class MotorStatus:
 @dataclass
 class AFMStatus:
     """Data class representing the complete status of the AFM system."""
-    # Core AFM measurements
+    # --- Fields without defaults --- MUST come first
     timestamp: int          # Timestamp in milliseconds
-    adc_0: int              # ADC channel 0 reading
-    adc_1: int              # ADC channel 1 reading
+    adc_0: int              # ADC channel 0 reading (raw)
+    adc_1: int              # ADC channel 1 reading (raw)
+    adc_0_avg: float        # ADC channel 0 reading (averaged)
+    adc_1_avg: float        # ADC channel 1 reading (averaged)
     dac_f: int              # Feedback DAC value
     dac_t: int              # Tuning DAC value
     dac_x: int              # X-axis DAC value
     dac_y: int              # Y-axis DAC value
     dac_z: int              # Z-axis DAC value
+    loop_last_period_us: int = 0 # Firmware provides this
 
-    # Motor status (position, target, running state)
+    # --- Fields with defaults --- MUST come after non-defaults
     motor_1: MotorStatus = field(default_factory=MotorStatus)  # Motor 1 status
     motor_2: MotorStatus = field(default_factory=MotorStatus)  # Motor 2 status
     motor_3: MotorStatus = field(default_factory=MotorStatus)  # Motor 3 status
-
-    # System state
     state: AFMState = AFMState.IDLE
-
-    # Control loop timing (from firmware)
-    loop_last_period_us: int = 0
-    loop_last_freq_hz: float = 0.0
-    loop_avg_freq_hz: float = 0.0
+    loop_last_freq_hz: float = 0.0 # Firmware provides this
+    loop_avg_freq_hz: float = 0.0  # Firmware provides this
 
 
 class AFM:
@@ -393,10 +391,17 @@ class AFM:
                 # --- Parsing logic moved here from _serial_read_loop ---
                 required_fields = [
                     "timestamp", "adc_0", "adc_1", "dac_f", "dac_t", "dac_x", "dac_y", "dac_z",
-                    "motor_1", "motor_2", "motor_3", "state"
+                    "motor_1", "motor_2", "motor_3", "state",
+                    # Add new average fields
+                    "adc_0_avg", "adc_1_avg",
+                    # Add loop timing fields
+                    "loop_last_period_us", "loop_last_freq_hz", "loop_avg_freq_hz"
                 ]
-                if not all(field in response for field in required_fields):
-                    print(f"Missing required field in status response: {response}")
+                # Check if all required fields are present in the response dictionary
+                missing_fields = [field for field in required_fields if field not in response]
+                if missing_fields:
+                    print(f"Missing required field(s) in status response: {', '.join(missing_fields)}")
+                    print(f"Raw response: {response}")
                     return None
 
                 # Check motor data structure
@@ -411,14 +416,16 @@ class AFM:
                     return response.get(f"motor_{num}", {})
 
                 status = AFMStatus(
-                    timestamp=int(response.get("timestamp", 0)),
-                    adc_0=int(response.get("adc_0", 0)),
-                    adc_1=int(response.get("adc_1", 0)),
-                    dac_f=int(response.get("dac_f", 0)),
-                    dac_t=int(response.get("dac_t", 0)),
-                    dac_x=int(response.get("dac_x", 0)),
-                    dac_y=int(response.get("dac_y", 0)),
-                    dac_z=int(response.get("dac_z", 0)),
+                    timestamp=int(response["timestamp"]),
+                    adc_0=int(response["adc_0"]),
+                    adc_1=int(response["adc_1"]),
+                    adc_0_avg=float(response["adc_0_avg"]),
+                    adc_1_avg=float(response["adc_1_avg"]),
+                    dac_f=int(response["dac_f"]),
+                    dac_t=int(response["dac_t"]),
+                    dac_x=int(response["dac_x"]),
+                    dac_y=int(response["dac_y"]),
+                    dac_z=int(response["dac_z"]),
                     motor_1=MotorStatus(
                         position=int(get_motor_data(1).get("position", 0)),
                         target=int(get_motor_data(1).get("target", 0)),
@@ -479,8 +486,9 @@ class AFM:
     def stop_motor(self, motor: Optional[int] = None) -> Optional[Dict]:
         """Stop motor movement."""
         cmd = {'command': 'stop_motor'}
-        if motor in {1, 2, 3}:
-            cmd['motor'] = motor
+        # Firmware 'stop_motor' command does not take a specific motor ID
+        # if motor in {1, 2, 3}:
+        #     cmd['motor'] = motor
         return self.send_and_receive(cmd)
 
     def is_moving(self, motor: Optional[int] = None) -> bool:
@@ -928,7 +936,10 @@ class AFM:
             return False
 
     def set_pid_parameters(self, kp: Optional[float] = None, ki: Optional[float] = None,
-                           kd: Optional[float] = None, invert: Optional[bool] = None) -> bool:
+                           kd: Optional[float] = None, invert: Optional[bool] = None,
+                           target: Optional[int] = None, slew_rate: Optional[float] = None,
+                           integral_min: Optional[float] = None, integral_max: Optional[float] = None,
+                           bias: Optional[float] = None) -> bool:
         """Set PID control parameters.
 
         Args:
@@ -936,6 +947,11 @@ class AFM:
             ki (Optional[float]): Integral gain
             kd (Optional[float]): Derivative gain
             invert (Optional[bool]): Whether to invert the PID output
+            target (Optional[int]): Target ADC value for the PID controller.
+            slew_rate (Optional[float]): Maximum change per second for the output.
+            integral_min (Optional[float]): Minimum value for the integral term.
+            integral_max (Optional[float]): Maximum value for the integral term.
+            bias (Optional[float]): Bias added to the PID output.
 
         Returns:
             bool: True if successful, False otherwise
@@ -951,18 +967,19 @@ class AFM:
             }
 
             # Add parameters if specified
-            if kp is not None:
-                command["kp"] = kp
-            if ki is not None:
-                command["ki"] = ki
-            if kd is not None:
-                command["kd"] = kd
-            if invert is not None:
-                command["invert"] = invert
+            if kp is not None: command["kp"] = kp
+            if ki is not None: command["ki"] = ki
+            if kd is not None: command["kd"] = kd
+            if invert is not None: command["invert"] = invert
+            if target is not None: command["target"] = target
+            if slew_rate is not None: command["slew_rate"] = slew_rate
+            if integral_min is not None: command["integral_min"] = integral_min
+            if integral_max is not None: command["integral_max"] = integral_max
+            if bias is not None: command["bias"] = bias
 
             # Send command
             response = self.send_and_receive(command)
-            return response.get("status") == "success"
+            return response is not None and response.get("status") == "success"
 
         except Exception as e:
             print(f"Error setting PID parameters: {e}")
@@ -984,7 +1001,7 @@ class AFM:
                 "action": "get_status"
             })
 
-            if response.get("status") == "success":
+            if response and response.get("status") == "success":
                 return {
                     "enabled": response.get("enabled", False),
                     "target": response.get("target", 0),
@@ -992,14 +1009,54 @@ class AFM:
                     "ki": response.get("ki", 0),
                     "kd": response.get("kd", 0),
                     "invert": response.get("invert", False),
+                    "slew_rate": response.get("slew_rate", 0),
+                    "bias": response.get("bias", 0),
+                    "integral_min": response.get("integral_min", 0),
+                    "integral_max": response.get("integral_max", 0),
+                    "current_integral": response.get("current_integral", 0),
                     "current_value": response.get("current_value", 0),
                     "output": response.get("output", 0)
                 }
-            return None
+            else:
+                print(f"Failed to get PID status or bad status: {response}")
+                return None
 
         except Exception as e:
             print(f"Error getting PID status: {e}")
             return None
+
+    def set_adc_avg_window(self, window_size: int) -> bool:
+        """Set the number of ADC samples to average.
+
+        Args:
+            window_size (int): Number of samples (1 to MAX_ADC_AVG_WINDOW_SIZE in firmware).
+
+        Returns:
+            bool: True if successful, False otherwise.
+        """
+        if not self.is_connected():
+            print("Error: Not connected")
+            return False
+
+        if not isinstance(window_size, int) or window_size < 1:
+            print("Error: window_size must be a positive integer.")
+            return False
+        # Note: MAX_ADC_AVG_WINDOW_SIZE is defined in firmware, we don't check the upper bound here.
+
+        try:
+            response = self.send_and_receive({
+                "command": "set_adc_avg_window",
+                "window_size": window_size
+            })
+            if response and response.get("status") == "success":
+                print(f"Successfully set ADC average window size to {window_size}")
+                return True
+            else:
+                print(f"Failed to set ADC average window size. Response: {response}")
+                return False
+        except Exception as e:
+            print(f"Error setting ADC average window size: {e}")
+            return False
 
     # Scan Methods
     def start_scan(self, x_start: int, x_end: int, y_start: int, y_end: int,
@@ -1474,7 +1531,7 @@ class AFM:
             # Save as TIFF (preserving NaN values, using float32)
             # Note: We do NOT transpose here like for Gwyddion CSV.
             # Standard TIFF is often (rows=Y, columns=X)
-            tifffile.imwrite(filename, image, imagej=True) # Use imagej=True for better compatibility
+            tifffile.imwrite(filename, image.T, imagej=True) # Use imagej=True for better compatibility
             
             print(f"[✔] Exported {filename} ({resolution}x{resolution}) as TIFF.")
             print(f"  - Scan type: {scan_type}")

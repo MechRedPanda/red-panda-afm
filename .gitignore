@@ -19,3 +19,4 @@ Thumbs.db
 # Project Specific
 cad/afm/*.3mf
 data/
+*.csv

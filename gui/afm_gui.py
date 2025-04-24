@@ -384,7 +384,7 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
         resolution = self.afm.scan_resolution
         
         # Generate base filename
-        base_filename = f"{timestamp}_{scan_type}_{channel}_{resolution}x{resolution}.csv"
+        base_filename = f"{timestamp}_{scan_type}_{channel}_{resolution}x{resolution}.tiff"
         
         # Combine with data directory
         return os.path.join(self.data_dir, base_filename)
@@ -407,32 +407,32 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
             else:
                 # Use user-provided filename as base
                 base_path = os.path.join(self.data_dir, os.path.splitext(filename)[0])
-                trace_adc_filename = f"{base_path}_trace_adc0.csv"
-                trace_dacz_filename = f"{base_path}_trace_dacz.csv"
-                retrace_adc_filename = f"{base_path}_retrace_adc0.csv"
-                retrace_dacz_filename = f"{base_path}_retrace_dacz.csv"
+                trace_adc_filename = f"{base_path}_trace_adc0.tiff"
+                trace_dacz_filename = f"{base_path}_trace_dacz.tiff"
+                retrace_adc_filename = f"{base_path}_retrace_adc0.tiff"
+                retrace_dacz_filename = f"{base_path}_retrace_dacz.tiff"
 
             # Export all combinations
             success = True
-            if self.afm.export_csv(trace_adc_filename, scan_type="trace", channel="adc0"):
+            if self.afm.export_tiff(trace_adc_filename, scan_type="trace", channel="adc0"):
                 print(f"Saved trace ADC0 data to {trace_adc_filename}")
             else:
                 success = False
                 print(f"Failed to save trace ADC0 data")
 
-            if self.afm.export_csv(trace_dacz_filename, scan_type="trace", channel="dacz"):
+            if self.afm.export_tiff(trace_dacz_filename, scan_type="trace", channel="dacz"):
                 print(f"Saved trace DACZ data to {trace_dacz_filename}")
             else:
                 success = False
                 print(f"Failed to save trace DACZ data")
 
-            if self.afm.export_csv(retrace_adc_filename, scan_type="retrace", channel="adc0"):
+            if self.afm.export_tiff(retrace_adc_filename, scan_type="retrace", channel="adc0"):
                 print(f"Saved retrace ADC0 data to {retrace_adc_filename}")
             else:
                 success = False
                 print(f"Failed to save retrace ADC0 data")
 
-            if self.afm.export_csv(retrace_dacz_filename, scan_type="retrace", channel="dacz"):
+            if self.afm.export_tiff(retrace_dacz_filename, scan_type="retrace", channel="dacz"):
                 print(f"Saved retrace DACZ data to {retrace_dacz_filename}")
             else:
                 success = False
@@ -643,6 +643,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.focused_dac_control = None
         self.last_dac_update_time = 0
 
+        # References to child widgets
+        self.focus_widget = None
+        self.approach_widget = None
+        self.scan_widget = None
+
         self.init_ui()
 
     def init_ui(self):
@@ -672,6 +677,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.update_timer.timeout.connect(self.update_all)
         self.update_timer.start(100)
 
+        # Connect ADC Average controls
+        self.avg_points_refresh.clicked.connect(self.set_adc_average_window)
+        self.avg_points_input.editingFinished.connect(self.set_adc_average_window) # Also apply on edit finish
+
+        # Connect Plot history
+        self.plot_history_input.editingFinished.connect(self.update_plot_history)
+        self._plot_time_window_s = float(self.plot_history_input.text()) # Initial value
+
     def setup_pid_control(self):
         """Initialize PID control elements and connect signals"""
         # Set up input validation for PID parameters
@@ -691,64 +704,80 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.d_input_box.setText("0.0")
 
         # Connect signals
-        self.pid_toggle_button.stateChanged.connect(self.toggle_pid)
-        self.pid_reverse_button.stateChanged.connect(self.toggle_pid_reverse)
-        # Connect the refresh button
+        self.pid_enable_button.clicked.connect(self.enable_pid_control)
+        self.pid_disable_button.clicked.connect(self.disable_pid_control)
+        self.pid_reverse_button.stateChanged.connect(self.apply_pid_parameters)
         self.pid_refresh_button.clicked.connect(self.refresh_pid_parameters)
+        self.target_adc_value_input.editingFinished.connect(self.on_target_adc_changed)
+        self.p_input_box.editingFinished.connect(self.apply_pid_parameters)
+        self.i_input_box.editingFinished.connect(self.apply_pid_parameters)
+        self.d_input_box.editingFinished.connect(self.apply_pid_parameters)
 
         # Add status update timer
         self.pid_status_timer = QTimer(self)
         self.pid_status_timer.timeout.connect(self.update_pid_status)
         self.pid_status_timer.start(100)  # Update every 100ms
 
-    def toggle_pid(self, state):
-        """Toggle PID control on/off"""
+    def enable_pid_control(self):
+        """Handle the PID Enable button click."""
         if not self.afm.is_connected():
-            QMessageBox.warning(self, "Not Connected",
-                                "Please connect to AFM first")
-            self.pid_toggle_button.setChecked(False)
+            QMessageBox.warning(self, "Not Connected", "Please connect to AFM first")
             return
 
         try:
-            if state == Qt.CheckState.Checked.value:
-                # Enable PID with current parameters
-                self.apply_pid_parameters()
-            else:
-                # Disable PID
-                self.afm.disable_pid()
-        except Exception as e:
-            QMessageBox.warning(self, "PID Error",
-                                f"Failed to toggle PID: {str(e)}")
-            self.pid_toggle_button.setChecked(False)
-
-    def toggle_pid_reverse(self, state):
-        """Toggle PID reverse mode"""
-        if not self.afm.is_connected():
-            return
-
-        try:
-            # Get current PID parameters
-            kp = float(self.p_input_box.text())
-            ki = float(self.i_input_box.text())
-            kd = float(self.d_input_box.text())
+            # Get target ADC value, use current value if empty
+            target = None
             if self.target_adc_value_input.text():
-                target = int(self.target_adc_value_input.text())
+                try:
+                    target = int(self.target_adc_value_input.text())
+                except ValueError:
+                    QMessageBox.warning(self, "Invalid Input", "Target ADC must be a valid integer.")
+                    return
             else:
-                target = self.afm.status_queue[-1].adc_0
-                self.target_adc_value_input.setText(str(target))
+                # Fetch current ADC if target is empty
+                status = self.afm.get_status()
+                if status:
+                    target = status.adc_0
+                    self.target_adc_value_input.setText(str(target))
+                else:
+                    QMessageBox.warning(self, "PID Error", "Could not get current ADC value for target.")
+                    return
 
-            # Apply parameters with new reverse state
-            self.afm.set_pid_parameters(
-                kp=kp, ki=ki, kd=kd, invert=state == Qt.CheckState.Checked.value)
+            # Ensure parameters are sent/refreshed before enabling
+            self.apply_pid_parameters()
 
-            # If PID is enabled, re-enable it with new parameters
-            if self.pid_toggle_button.isChecked():
-                self.afm.enable_pid(target=target)
+            # Now attempt to enable
+            enable_response = self.afm.enable_pid(target=target)
+            if enable_response and enable_response.get("status") == "success":
+                self.pid_enabled_radio.setChecked(True)
+                print("PID Enabled.")
+            else:
+                self.pid_enabled_radio.setChecked(False)
+                QMessageBox.warning(self, "PID Error", f"Failed to enable PID: {enable_response.get('message', 'Unknown error')}")
+                self.refresh_pid_parameters_from_hw() # Sync GUI
 
         except Exception as e:
-            QMessageBox.warning(self, "PID Error",
-                                f"Failed to toggle PID reverse: {str(e)}")
-            self.pid_reverse_button.setChecked(not state)
+            QMessageBox.warning(self, "PID Error", f"Failed to enable PID: {str(e)}")
+            self.refresh_pid_parameters_from_hw() # Sync GUI on error
+
+    def disable_pid_control(self):
+        """Handle the PID Disable button click."""
+        if not self.afm.is_connected():
+            QMessageBox.warning(self, "Not Connected", "Please connect to AFM first")
+            return
+
+        try:
+            success = self.afm.disable_pid()
+            if success:
+                self.pid_enabled_radio.setChecked(False)
+                print("PID Disabled.")
+            else:
+                self.pid_enabled_radio.setChecked(True) # Revert UI if disable failed
+                QMessageBox.warning(self, "PID Error", "Failed to disable PID.")
+                self.refresh_pid_parameters_from_hw() # Sync GUI
+        except Exception as e:
+            QMessageBox.warning(self, "PID Error", f"Failed to disable PID: {str(e)}")
+            self.refresh_pid_parameters_from_hw() # Sync GUI on error
 
     def apply_pid_parameters(self):
         """Apply current PID parameters to the AFM"""
@@ -772,14 +801,21 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.target_adc_value_input.setText(str(target))
 
             # Apply parameters
-            print(f"Applying PID parameters: kp={kp}, ki={ki}, kd={kd}, invert={pid_reverse}")
-            print(self.afm.set_pid_parameters(
-                kp=kp, ki=ki, kd=kd, invert=pid_reverse))
+            print(f"Applying PID parameters: kp={kp}, ki={ki}, kd={kd}, invert={pid_reverse}, target={target}")
+            success = self.afm.set_pid_parameters(
+                kp=kp, ki=ki, kd=kd, invert=pid_reverse, target=target)
 
-            # If PID is enabled, re-enable it with new parameters
-            if self.pid_toggle_button.isChecked():
-                print(f"Enabling PID with target={target}")
-                print(self.afm.enable_pid(target=target))
+            if not success:
+                QMessageBox.warning(self, "PID Error", "Failed to apply PID parameters")
+                # Refresh from hardware to ensure GUI matches reality
+                self.refresh_pid_parameters_from_hw()
+            else:
+                 # If PID is enabled, re-enable it with new parameters to ensure they take effect immediately
+                 if self.pid_enabled_radio.isChecked():
+                    enable_success = self.afm.enable_pid(target=target)
+                    if not enable_success:
+                         QMessageBox.warning(self, "PID Error", "Failed to re-enable PID after parameter change.")
+                         self.refresh_pid_parameters_from_hw() # Sync GUI
 
         except ValueError:
             QMessageBox.warning(self, "Invalid Input",
@@ -797,9 +833,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             status = self.afm.get_pid_status()
             if status:
                 # Update checkbox state based on PID state
-                self.pid_toggle_button.setChecked(status.get('enabled', False))
+                self.pid_enabled_radio.setChecked(status.get('enabled', False))
+                self.pid_reverse_button.setChecked(status.get('invert', False))
 
-                # Don't update the target_adc_value_input or P, I, D parameters
+                # Don't update the target_adc_value_input or P, I, D parameters from status
                 # These should only be set by user input
 
         except Exception as e:
@@ -816,14 +853,20 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             ki = float(self.i_input_box.text())
             kd = float(self.d_input_box.text())
             invert = self.pid_reverse_button.isChecked()
+            target = None
+            if self.target_adc_value_input.text():
+                try:
+                    target = int(self.target_adc_value_input.text())
+                except ValueError:
+                    QMessageBox.warning(self, "Invalid Input", "Target ADC must be a valid integer for refresh.")
+                    return
 
-            print(f"Refreshing PID parameters: kp={kp}, ki={ki}, kd={kd}, invert={invert}")
-            success = self.afm.set_pid_parameters(kp=kp, ki=ki, kd=kd, invert=invert)
+            print(f"Refreshing PID parameters: kp={kp}, ki={ki}, kd={kd}, invert={invert}, target={target}")
+            success = self.afm.set_pid_parameters(kp=kp, ki=ki, kd=kd, invert=invert, target=target)
 
             if success:
                 print("PID parameters sent successfully.")
-                # Optional: Provide visual feedback (e.g., status bar message)
-                self.statusbar.showMessage("PID parameters refreshed.", 2000) # Show for 2 seconds
+                self.statusbar.showMessage("PID parameters refreshed.", 2000)
             else:
                 QMessageBox.warning(self, "PID Error", "Failed to send PID parameters to AFM.")
 
@@ -831,6 +874,38 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             QMessageBox.warning(self, "Invalid Input", "Please enter valid numbers for PID parameters.")
         except Exception as e:
             QMessageBox.warning(self, "PID Error", f"Failed to refresh PID parameters: {str(e)}")
+
+    def refresh_pid_parameters_from_hw(self):
+        """Fetch PID parameters from hardware and update the GUI."""
+        if not self.afm.is_connected():
+            return
+        try:
+            status = self.afm.get_pid_status()
+            if status:
+                # Update GUI elements, blocking signals temporarily
+                self.p_input_box.blockSignals(True)
+                self.i_input_box.blockSignals(True)
+                self.d_input_box.blockSignals(True)
+                self.pid_reverse_button.blockSignals(True)
+                self.target_adc_value_input.blockSignals(True)
+
+                self.p_input_box.setText(f"{status.get('kp', 0.0):.4f}")
+                self.i_input_box.setText(f"{status.get('ki', 0.0):.4f}")
+                self.d_input_box.setText(f"{status.get('kd', 0.0):.4f}")
+                self.pid_reverse_button.setChecked(status.get('invert', False))
+                self.target_adc_value_input.setText(str(status.get('target', 0)))
+                self.pid_enabled_radio.setChecked(status.get('enabled', False))
+
+                self.p_input_box.blockSignals(False)
+                self.i_input_box.blockSignals(False)
+                self.d_input_box.blockSignals(False)
+                self.pid_reverse_button.blockSignals(False)
+                self.target_adc_value_input.blockSignals(False)
+                print("PID GUI refreshed from hardware.")
+            else:
+                QMessageBox.warning(self, "PID Error", "Could not get PID status from hardware to refresh GUI.")
+        except Exception as e:
+            QMessageBox.warning(self, "PID Error", f"Error refreshing PID GUI from hardware: {e}")
 
     def setup_plots(self):
         self.adc_plot_widget.setTitle(
@@ -843,9 +918,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.adc_plot_widget.setBackground('white')
         self.adc_plot_widget.addLegend()
         self.adc_0_plot_curve = self.adc_plot_widget.plot(
-            pen=pg.mkPen('b', width=2), name="ADC 0")
+            pen=pg.mkPen('b', width=2), name="ADC 0 Avg")
         self.adc_1_plot_curve = self.adc_plot_widget.plot(
-            pen=pg.mkPen('r', width=2), name="ADC 1")
+            pen=pg.mkPen('r', width=2), name="ADC 1 Avg")
 
         self.dac_plot_widget.setTitle("DAC Values", color="r", size="12pt")
         self.dac_plot_widget.setLabel(
@@ -1132,22 +1207,86 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.update_motor_status(latest_status)
 
     def update_plots(self, status):
-        if len(self.afm.status_queue) < 2:
+        # Use the plot history window size
+        history_duration_ms = self._plot_time_window_s * 1000
+
+        # Filter the queue based on the time window
+        current_time_ms = status.timestamp # Timestamp of the *latest* status
+        cutoff_time_ms = current_time_ms - history_duration_ms
+
+        # Filter AFM status queue efficiently
+        relevant_statuses = [s for s in self.afm.status_queue if s.timestamp >= cutoff_time_ms]
+
+        if not relevant_statuses:
+            # Clear plots if no data in window
+            self.adc_0_plot_curve.clear()
+            self.adc_1_plot_curve.clear()
+            self.dac_f_plot.clear()
+            self.dac_t_plot.clear()
             return
 
-        timestamps = [s.timestamp - self.afm.status_queue[0].timestamp
-                      for s in self.afm.status_queue]
-        seconds = [t/1000 for t in timestamps]
+        # Calculate time relative to the *latest* timestamp (current_time_ms)
+        # Timestamps will now be 0 or negative
+        seconds = [(s.timestamp - current_time_ms) / 1000.0 for s in relevant_statuses]
 
-        adc0 = [s.adc_0 for s in self.afm.status_queue]
-        adc1 = [s.adc_1 for s in self.afm.status_queue]
-        self.adc_0_plot_curve.setData(seconds, adc0)
-        self.adc_1_plot_curve.setData(seconds, adc1)
+        # Check plot visibility flags
+        adc0_enabled = self.adc_0_enable_checkbox.isChecked()
+        adc1_enabled = self.adc_1_enable_checkbox.isChecked()
 
-        dacf = [s.dac_f for s in self.afm.status_queue]
-        dact = [s.dac_t for s in self.afm.status_queue]
-        self.dac_f_plot.setData(seconds, dacf)
-        self.dac_t_plot.setData(seconds, dact)
+        # Update ADC plots
+        if adc0_enabled:
+            # Plot averaged data instead of raw
+            adc0_avg = [s.adc_0_avg for s in relevant_statuses]
+            self.adc_0_plot_curve.setData(seconds, adc0_avg)
+            self.adc_0_plot_curve.setVisible(True)
+        else:
+            self.adc_0_plot_curve.clear()
+            self.adc_0_plot_curve.setVisible(False)
+
+        if adc1_enabled:
+            # Plot averaged data instead of raw
+            adc1_avg = [s.adc_1_avg for s in relevant_statuses]
+            self.adc_1_plot_curve.setData(seconds, adc1_avg)
+            self.adc_1_plot_curve.setVisible(True)
+        else:
+            self.adc_1_plot_curve.clear()
+            self.adc_1_plot_curve.setVisible(False)
+
+        # Update DAC plots
+        dacf_enabled = self.dac_f_enable_checkbox.isChecked()
+        dact_enabled = self.dac_t_enable_checkbox.isChecked()
+
+        if dacf_enabled:
+            dacf = [s.dac_f for s in relevant_statuses]
+            self.dac_f_plot.setData(seconds, dacf)
+            self.dac_f_plot.setVisible(True)
+        else:
+            self.dac_f_plot.clear()
+            self.dac_f_plot.setVisible(False)
+
+        if dact_enabled:
+            dact = [s.dac_t for s in relevant_statuses]
+            self.dac_t_plot.setData(seconds, dact)
+            self.dac_t_plot.setVisible(True)
+        else:
+            self.dac_t_plot.clear()
+            self.dac_t_plot.setVisible(False)
+
+        # Adjust x-axis range dynamically
+        if seconds:
+             # Range should be from -history_window to 0
+             # Actual earliest time relative to t=0 (will be negative or zero)
+             actual_earliest_time = seconds[0]
+             # Desired earliest time based on history window
+             window_earliest_time = -self._plot_time_window_s
+
+             # Determine the minimum time to display
+             # Use the later (less negative) of the actual earliest time and the window start time
+             min_time = max(actual_earliest_time, window_earliest_time)
+             max_time = 0 # Latest time is always 0
+
+             self.adc_plot_widget.setXRange(min_time, max_time, padding=0.05)
+             self.dac_plot_widget.setXRange(min_time, max_time, padding=0.05)
 
     def setup_motor_ui(self):
         """Initialize motor control UI elements for all three motors"""
@@ -1305,19 +1444,116 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self, "Error", f"Error during restore: {str(e)}")
 
     def on_target_adc_changed(self):
-        """Handle changes to the target ADC value input"""
-        if not self.afm.is_connected() or not self.pid_toggle_button.isChecked():
+        """Handle changes to the target ADC value input - Apply parameters if PID is enabled"""
+        if not self.afm.is_connected():
             return
 
         try:
             # Get the new target value
+            target = None
             if self.target_adc_value_input.text():
-                target = int(self.target_adc_value_input.text())
-                # Update PID with new target
-                self.afm.enable_pid(target=target)
+                try:
+                    target = int(self.target_adc_value_input.text())
+                except ValueError:
+                    QMessageBox.warning(self, "Invalid Input", "Target ADC must be a valid integer.")
+                    # Optionally revert the text or clear it
+                    # self.target_adc_value_input.setText("")
+                    return # Don't proceed if invalid
+
+            # Apply parameters only if PID is currently enabled
+            if self.pid_enabled_radio.isChecked():
+                 # Get other parameters from GUI
+                 kp = float(self.p_input_box.text())
+                 ki = float(self.i_input_box.text())
+                 kd = float(self.d_input_box.text())
+                 invert = self.pid_reverse_button.isChecked()
+
+                 print(f"Target ADC changed while PID enabled. Applying: target={target}")
+                 success = self.afm.set_pid_parameters(kp=kp, ki=ki, kd=kd, invert=invert, target=target)
+                 if success:
+                    # Re-enable to make sure target takes effect (firmware might require this)
+                    enable_success = self.afm.enable_pid(target=target)
+                    if not enable_success:
+                         QMessageBox.warning(self, "PID Error", "Failed to re-enable PID after target change.")
+                         self.refresh_pid_parameters_from_hw()
+                 else:
+                    QMessageBox.warning(self, "PID Error", "Failed to set new PID target.")
+                    self.refresh_pid_parameters_from_hw()
+            else:
+                # If PID is not enabled, just store the value, don't send anything yet.
+                # The value will be used when enable_pid_control is called.
+                print(f"Target ADC changed (PID disabled): {target}")
+
         except ValueError:
+            # This handles potential float conversion errors for kp,ki,kd if they are invalid
+            # The target int conversion error is handled above.
             QMessageBox.warning(self, "Invalid Input",
-                              "Please enter a valid number for target ADC value")
+                              "Please enter valid numbers for PID parameters (P, I, D).")
+        except Exception as e:
+            QMessageBox.warning(self, "PID Error", f"Error handling target ADC change: {e}")
+            self.refresh_pid_parameters_from_hw() # Sync GUI on unexpected error
+
+    def set_adc_average_window(self):
+        """Read the value from avg_points_input and send it to the AFM."""
+        if not self.afm.is_connected():
+            QMessageBox.warning(self, "Not Connected", "Please connect to AFM first.")
+            return
+
+        try:
+            window_size = int(self.avg_points_input.text())
+            if window_size < 1:
+                raise ValueError("Window size must be at least 1")
+
+            success = self.afm.set_adc_avg_window(window_size)
+
+            if success:
+                self.statusbar.showMessage(f"ADC average window set to {window_size}.", 2000)
+            else:
+                QMessageBox.warning(self, "ADC Avg Error", "Failed to set ADC average window size on AFM.")
+                # Optional: Read back the actual value if the command supported it
+
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter a valid positive integer for average points.")
+            # Reset to a default or last known good value? For now, just warn.
+            # self.avg_points_input.setText("3")
+        except Exception as e:
+            QMessageBox.critical(self, "ADC Avg Error", f"Error setting ADC average window: {str(e)}")
+
+    def update_plot_history(self):
+        """Update the time window used for plotting."""
+        try:
+            new_window_s = float(self.plot_history_input.text())
+            if new_window_s <= 0:
+                raise ValueError("Plot history must be positive")
+            self._plot_time_window_s = new_window_s
+            print(f"Plot history window updated to: {self._plot_time_window_s} s")
+            # Force plot update maybe? Or let the regular timer handle it.
+            # self.update_plots(list(self.afm.status_queue)[-1]) # Example immediate update
+        except ValueError:
+             QMessageBox.warning(self, "Invalid Input", "Please enter a valid positive number for plot history (seconds).")
+             # Revert to previous value
+             self.plot_history_input.setText(str(self._plot_time_window_s))
+
+    def closeEvent(self, event):
+        """Ensure child widgets and AFM connection are closed."""
+        print("MainWindow close event triggered.")
+
+        # Close child widgets if they exist
+        if self.focus_widget:
+            print("Closing FocusWidget...")
+            self.focus_widget.close()
+        if self.approach_widget:
+            print("Closing ApproachWidget...")
+            self.approach_widget.close()
+        if self.scan_widget:
+            print("Closing ScanWidget...")
+            self.scan_widget.close()
+
+        # Close AFM connection
+        self.afm_close()
+
+        # Accept the close event
+        super().closeEvent(event)
 
 
 if __name__ == "__main__":

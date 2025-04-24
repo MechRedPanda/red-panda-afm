@@ -31,6 +31,7 @@
 // Global Constants
 // ============================================================================
 static const int MAX_APPROACH_POINTS = 1000;
+#define MAX_ADC_AVG_WINDOW_SIZE 16 // Maximum ADC average window size
 
 // ============================================================================
 // Hardware Configuration
@@ -113,6 +114,15 @@ struct AFMState
     uint16_t adc_0_val = 0;
     uint16_t adc_1_val = 0;
 
+    // ADC Moving Average
+    float adc_0_avg = 0.0f;
+    float adc_1_avg = 0.0f;
+    uint16_t adc_0_history[MAX_ADC_AVG_WINDOW_SIZE]; // Use MAX size
+    uint16_t adc_1_history[MAX_ADC_AVG_WINDOW_SIZE]; // Use MAX size
+    uint8_t adc_history_index = 0;
+    uint8_t adc_history_count = 0;
+    uint8_t adc_avg_window_size = 3; // Default window size, configurable
+
     // Motor States
     MotorState motors[3]; // Index 0-2 for motors 1-3
 
@@ -122,13 +132,15 @@ struct AFMState
 
     // PID Control Parameters
     bool pid_enabled = false;
-    uint16_t pid_target = 0;
+    float pid_target = 0.0f;
     float pid_kp = 1.0;
     float pid_ki = 0.0;
     float pid_kd = 0.0;
     bool pid_invert = false;
     float pid_integral = 0;
-    uint16_t pid_last_error = 0;
+    float pid_integral_min = -50000.0f; // Default limit
+    float pid_integral_max =  50000.0f; // Default limit
+    float pid_last_error = 0.0f;
     uint32_t pid_last_time = 0;
     float pid_slew_rate = 1000000.0; // Maximum change per second
     float pid_last_output = 0;
@@ -138,7 +150,7 @@ struct AFMState
     struct ApproachData
     {
         int32_t steps;
-        uint16_t adc;
+        float adc;
         int32_t position;
     };
     ApproachData approach_data[MAX_APPROACH_POINTS];
@@ -148,7 +160,7 @@ struct AFMState
     int approach_step_size = 0;
     int approach_direction = 0;
     uint16_t approach_threshold = 0;
-    uint16_t approach_initial_adc = 0;
+    float approach_initial_adc = 0.0f;
     int32_t approach_initial_position = 0;
     int32_t approach_max_steps = 0;
     unsigned long approach_polling_interval = 50; // ms
@@ -370,9 +382,9 @@ void updateMotorMovement()
         for (int i = 0; i < steps_to_take; i++)
         {
             digitalWrite(step_pin, HIGH);
-            delayMicroseconds(20);
+            delayMicroseconds(10);
             digitalWrite(step_pin, LOW);
-            delayMicroseconds(20);
+            delayMicroseconds(10);
         }
 
         // Update control state
@@ -458,13 +470,52 @@ void updateAFMState()
         return;
     if (acquireADC())
     {
-        delayMicroseconds(10);
-        current_afm_state.adc_0_val = adc_0.readADC();
-        delayMicroseconds(10);
-        current_afm_state.adc_1_val = adc_1.readADC();
-        delayMicroseconds(10);
+        delayMicroseconds(1);
+        uint16_t new_adc0 = adc_0.readADC();
+        delayMicroseconds(1);
+        uint16_t new_adc1 = adc_1.readADC();
+        delayMicroseconds(1);
         current_afm_state.timestamp = millis();
         releaseADC();
+
+        // Update raw ADC values
+        current_afm_state.adc_0_val = new_adc0;
+        current_afm_state.adc_1_val = new_adc1;
+
+        // Update moving average
+        // Store new value in history buffer
+        current_afm_state.adc_0_history[current_afm_state.adc_history_index] = new_adc0;
+        current_afm_state.adc_1_history[current_afm_state.adc_history_index] = new_adc1;
+
+        // Increment index and wrap around using the current window size
+        current_afm_state.adc_history_index = (current_afm_state.adc_history_index + 1) % current_afm_state.adc_avg_window_size;
+
+        // Increment count until buffer reaches the current window size
+        if (current_afm_state.adc_history_count < current_afm_state.adc_avg_window_size)
+        {
+            current_afm_state.adc_history_count++;
+        }
+
+        // Calculate sum
+        uint32_t sum0 = 0;
+        uint32_t sum1 = 0;
+        for (uint8_t i = 0; i < current_afm_state.adc_history_count; i++)
+        {
+            sum0 += current_afm_state.adc_0_history[i];
+            sum1 += current_afm_state.adc_1_history[i];
+        }
+
+        // Calculate and store average (avoid division by zero)
+        if (current_afm_state.adc_history_count > 0)
+        {
+            current_afm_state.adc_0_avg = (float)sum0 / current_afm_state.adc_history_count;
+            current_afm_state.adc_1_avg = (float)sum1 / current_afm_state.adc_history_count;
+        }
+        else
+        {
+            current_afm_state.adc_0_avg = 0.0f;
+            current_afm_state.adc_1_avg = 0.0f;
+        }
     }
 }
 
@@ -482,14 +533,16 @@ void updatePIDControl()
     if (dt == 0)
         return;
 
-    // Calculate error
-    int32_t error = current_afm_state.pid_target - current_afm_state.adc_0_val;
+    // Calculate error using average ADC value
+    float error = current_afm_state.pid_target - current_afm_state.adc_0_avg; // Use average ADC
     if (current_afm_state.pid_invert)
         error = -error;
 
     // Calculate PID terms
     float p_term = current_afm_state.pid_kp * error;
     current_afm_state.pid_integral += current_afm_state.pid_ki * error * dt / 1000.0;
+    // Clamp the integral term
+    current_afm_state.pid_integral = constrain(current_afm_state.pid_integral, current_afm_state.pid_integral_min, current_afm_state.pid_integral_max);
     float d_term = current_afm_state.pid_kd * (error - current_afm_state.pid_last_error) / (dt / 1000.0);
 
     // Calculate output
@@ -539,7 +592,7 @@ bool startApproach(uint8_t motor, int step_size, uint16_t threshold, int32_t max
     current_afm_state.approach_data_count = 0;
 
     // Get initial values
-    current_afm_state.approach_initial_adc = current_afm_state.adc_0_val;
+    current_afm_state.approach_initial_adc = current_afm_state.adc_0_avg;
     current_afm_state.approach_initial_position = current_afm_state.motors[motor - 1].current_position;
 
     // Set approach parameters
@@ -569,7 +622,7 @@ bool startApproach(uint8_t motor, int step_size, uint16_t threshold, int32_t max
     current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
         0,
         current_afm_state.approach_initial_adc,
-        current_afm_state.approach_initial_position};
+        current_afm_state.motors[current_afm_state.approach_motor - 1].current_position};
     current_afm_state.approach_last_stored_step = 0;
 
     return true;
@@ -596,8 +649,8 @@ void updateApproach()
         return;
     }
 
-    // Check threshold continuously
-    if (abs(current_afm_state.adc_0_val - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold)
+    // Check threshold continuously using average ADC value
+    if (abs(current_afm_state.adc_0_avg - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold)
     {
         stopApproach();
         return;
@@ -612,7 +665,7 @@ void updateApproach()
         {
             current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
                 current_steps,
-                current_afm_state.adc_0_val,
+                current_afm_state.adc_0_avg, // Store average ADC
                 current_afm_state.motors[current_afm_state.approach_motor - 1].current_position};
             current_afm_state.approach_last_stored_step = current_steps;
         }
@@ -1102,6 +1155,8 @@ JsonDocument getAFMStateAsJson()
     doc["timestamp"] = current_afm_state.timestamp;
     doc["adc_0"] = current_afm_state.adc_0_val;
     doc["adc_1"] = current_afm_state.adc_1_val;
+    doc["adc_0_avg"] = current_afm_state.adc_0_avg;
+    doc["adc_1_avg"] = current_afm_state.adc_1_avg;
     doc["dac_f"] = current_afm_state.dac_f_val;
     doc["dac_t"] = current_afm_state.dac_t_val;
     doc["dac_x"] = current_afm_state.dac_x_val;
@@ -1346,12 +1401,6 @@ String processCommand(const String &json_command)
         if (doc["action"] == "enable")
         {
             current_afm_state.pid_enabled = true;
-            current_afm_state.pid_target = doc["target"] | current_afm_state.adc_0_val;
-            current_afm_state.pid_last_time = millis();
-            current_afm_state.pid_integral = 0;
-            current_afm_state.pid_last_error = 0;
-            current_afm_state.pid_last_output = current_afm_state.dac_z_val;
-            current_afm_state.pid_bias = current_afm_state.dac_z_val;
             response["status"] = "success";
             response["message"] = "PID control enabled";
         }
@@ -1363,12 +1412,40 @@ String processCommand(const String &json_command)
         }
         else if (doc["action"] == "set_params")
         {
+            bool target_updated = false;
+            // Handle target parameter (integer only now) - use recommended check
+            if (doc["target"].is<int>())
+            {
+                // Assign to float state variable (implicit conversion is fine)
+                current_afm_state.pid_target = doc["target"].as<float>();
+                // Reset state only when target is explicitly set
+                current_afm_state.pid_integral = 0;
+                current_afm_state.pid_last_error = 0.0f;
+                current_afm_state.pid_last_time = millis(); // Reset time reference
+                current_afm_state.pid_last_output = current_afm_state.dac_z_val; // Start from current output
+                current_afm_state.pid_bias = current_afm_state.dac_z_val; // Set bias to current output
+                target_updated = true;
+            }
+
+            // Handle other parameters (Kp, Ki, Kd, etc.)
             current_afm_state.pid_kp = doc["kp"] | current_afm_state.pid_kp;
             current_afm_state.pid_ki = doc["ki"] | current_afm_state.pid_ki;
             current_afm_state.pid_kd = doc["kd"] | current_afm_state.pid_kd;
             current_afm_state.pid_invert = doc["invert"] | current_afm_state.pid_invert;
             current_afm_state.pid_slew_rate = doc["slew_rate"] | current_afm_state.pid_slew_rate;
-            current_afm_state.pid_bias = doc["bias"] | current_afm_state.pid_bias;
+            // Add integral limits (handle potential float/int) - use recommended check
+            if (doc["integral_min"].is<float>() || doc["integral_min"].is<int>()) {
+                 current_afm_state.pid_integral_min = doc["integral_min"].as<float>();
+            }
+            if (doc["integral_max"].is<float>() || doc["integral_max"].is<int>()) {
+                 current_afm_state.pid_integral_max = doc["integral_max"].as<float>();
+            }
+
+            // Only update bias if target was NOT updated in this command
+            if (!target_updated) {
+                current_afm_state.pid_bias = doc["bias"] | current_afm_state.pid_bias;
+            }
+
             response["status"] = "success";
             response["message"] = "PID parameters updated";
         }
@@ -1382,7 +1459,10 @@ String processCommand(const String &json_command)
             response["invert"] = current_afm_state.pid_invert;
             response["slew_rate"] = current_afm_state.pid_slew_rate;
             response["bias"] = current_afm_state.pid_bias;
-            response["current_value"] = current_afm_state.adc_0_val;
+            response["integral_min"] = current_afm_state.pid_integral_min;
+            response["integral_max"] = current_afm_state.pid_integral_max;
+            response["current_integral"] = current_afm_state.pid_integral;
+            response["current_value"] = current_afm_state.adc_0_avg; // Use average ADC
             response["output"] = current_afm_state.dac_z_val;
             response["status"] = "success";
         }
@@ -1565,6 +1645,36 @@ String processCommand(const String &json_command)
         {
             response["status"] = "error";
             response["message"] = "Invalid scan action";
+        }
+    }
+    else if (strcmp(command, "set_adc_avg_window") == 0)
+    {
+        const auto& window_size_param = doc["window_size"];
+        if (!window_size_param.is<int>())
+        {
+            response["status"] = "error";
+            response["message"] = "Missing or invalid 'window_size' parameter (must be integer)";
+        }
+        else
+        {
+            int new_size = window_size_param.as<int>();
+            if (new_size >= 1 && new_size <= MAX_ADC_AVG_WINDOW_SIZE)
+            {
+                current_afm_state.adc_avg_window_size = new_size;
+                // Reset history when changing window size
+                current_afm_state.adc_history_index = 0;
+                current_afm_state.adc_history_count = 0;
+                // Optional: Clear history buffer, but not strictly necessary
+                // memset(current_afm_state.adc_0_history, 0, sizeof(current_afm_state.adc_0_history));
+                // memset(current_afm_state.adc_1_history, 0, sizeof(current_afm_state.adc_1_history));
+                response["status"] = "success";
+                response["message"] = String("ADC average window size set to ") + String(new_size);
+            }
+            else
+            {
+                response["status"] = "error";
+                response["message"] = String("Invalid 'window_size' (must be 1-") + String(MAX_ADC_AVG_WINDOW_SIZE) + ")";
+            }
         }
     }
     else

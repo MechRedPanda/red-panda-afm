@@ -125,10 +125,130 @@
     </property>
     <layout class="QVBoxLayout" name="verticalLayout_2">
      <item>
-      <widget class="PlotWidget" name="adc_plot_widget" native="true"/>
+      <layout class="QHBoxLayout" name="horizontalLayout_5" stretch="10,1">
+       <item>
+        <widget class="PlotWidget" name="adc_plot_widget" native="true"/>
+       </item>
+       <item>
+        <layout class="QVBoxLayout" name="verticalLayout_3">
+         <property name="sizeConstraint">
+          <enum>QLayout::SetMinimumSize</enum>
+         </property>
+         <property name="bottomMargin">
+          <number>1</number>
+         </property>
+         <item>
+          <widget class="QCheckBox" name="adc_0_enable_checkbox">
+           <property name="text">
+            <string>ADC_0</string>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QCheckBox" name="adc_1_enable_checkbox">
+           <property name="text">
+            <string>ADC_1</string>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="label_12">
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Minimum" vsizetype="Minimum">
+             <horstretch>0</horstretch>
+             <verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+           <property name="text">
+            <string>history (s)</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLineEdit" name="plot_history_input">
+           <property name="text">
+            <string>60</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="verticalSpacer">
+           <property name="orientation">
+            <enum>Qt::Vertical</enum>
+           </property>
+           <property name="sizeType">
+            <enum>QSizePolicy::Preferred</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>20</width>
+             <height>40</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+      </layout>
      </item>
      <item>
-      <widget class="PlotWidget" name="dac_plot_widget" native="true"/>
+      <layout class="QHBoxLayout" name="horizontalLayout_3" stretch="10,1">
+       <item>
+        <widget class="PlotWidget" name="dac_plot_widget" native="true"/>
+       </item>
+       <item>
+        <layout class="QVBoxLayout" name="verticalLayout_5">
+         <property name="sizeConstraint">
+          <enum>QLayout::SetMinimumSize</enum>
+         </property>
+         <property name="bottomMargin">
+          <number>1</number>
+         </property>
+         <item>
+          <widget class="QCheckBox" name="dac_f_enable_checkbox">
+           <property name="text">
+            <string>dac_f</string>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QCheckBox" name="dac_t_enable_checkbox">
+           <property name="text">
+            <string>dac_t</string>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="verticalSpacer_3">
+           <property name="orientation">
+            <enum>Qt::Vertical</enum>
+           </property>
+           <property name="sizeType">
+            <enum>QSizePolicy::Preferred</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>20</width>
+             <height>40</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+        </layout>
+       </item>
+      </layout>
      </item>
     </layout>
    </widget>
@@ -315,10 +435,10 @@
    <widget class="QWidget" name="verticalLayoutWidget_2">
     <property name="geometry">
      <rect>
-      <x>40</x>
+      <x>30</x>
       <y>130</y>
       <width>211</width>
-      <height>149</height>
+      <height>131</height>
      </rect>
     </property>
     <layout class="QVBoxLayout" name="verticalLayout">
@@ -396,9 +516,9 @@
    <widget class="QWidget" name="gridLayoutWidget">
     <property name="geometry">
      <rect>
-      <x>40</x>
-      <y>290</y>
-      <width>271</width>
+      <x>30</x>
+      <y>450</y>
+      <width>259</width>
       <height>141</height>
      </rect>
     </property>
@@ -503,13 +623,20 @@
    <widget class="QWidget" name="gridLayoutWidget_3">
     <property name="geometry">
      <rect>
-      <x>40</x>
-      <y>450</y>
+      <x>30</x>
+      <y>370</y>
       <width>271</width>
-      <height>80</height>
+      <height>71</height>
      </rect>
     </property>
     <layout class="QGridLayout" name="gridLayout_3">
+     <item row="2" column="0">
+      <widget class="QLabel" name="label_10">
+       <property name="text">
+        <string>target_adc</string>
+       </property>
+      </widget>
+     </item>
      <item row="0" column="0">
       <widget class="QLabel" name="label_6">
        <property name="text">
@@ -554,7 +681,10 @@
      <item row="1" column="1">
       <widget class="QLineEdit" name="i_input_box"/>
      </item>
-     <item row="2" column="0">
+     <item row="2" column="1">
+      <widget class="QLineEdit" name="target_adc_value_input"/>
+     </item>
+     <item row="2" column="3">
       <widget class="QPushButton" name="pid_refresh_button">
        <property name="text">
         <string>RefreshPID</string>
@@ -566,29 +696,66 @@
    <widget class="QWidget" name="horizontalLayoutWidget_2">
     <property name="geometry">
      <rect>
-      <x>40</x>
-      <y>530</y>
-      <width>276</width>
+      <x>30</x>
+      <y>340</y>
+      <width>271</width>
       <height>25</height>
      </rect>
     </property>
     <layout class="QHBoxLayout" name="horizontalLayout_2">
      <item>
-      <widget class="QCheckBox" name="pid_toggle_button">
+      <widget class="QRadioButton" name="pid_enabled_radio">
        <property name="text">
-        <string>PID Enable</string>
+        <string>PID Enabled</string>
        </property>
       </widget>
      </item>
      <item>
-      <widget class="QLabel" name="label_10">
+      <widget class="QPushButton" name="pid_enable_button">
        <property name="text">
-        <string>target_adc</string>
+        <string>Enable PID</string>
        </property>
       </widget>
      </item>
      <item>
-      <widget class="QLineEdit" name="target_adc_value_input"/>
+      <widget class="QPushButton" name="pid_disable_button">
+       <property name="text">
+        <string>Disable PID</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </widget>
+   <widget class="QWidget" name="horizontalLayoutWidget">
+    <property name="geometry">
+     <rect>
+      <x>30</x>
+      <y>293</y>
+      <width>271</width>
+      <height>31</height>
+     </rect>
+    </property>
+    <layout class="QGridLayout" name="gridLayout_4">
+     <item row="0" column="0">
+      <widget class="QLabel" name="label_11">
+       <property name="text">
+        <string>avg_points</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QLineEdit" name="avg_points_input">
+       <property name="text">
+        <string>3</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="2">
+      <widget class="QPushButton" name="avg_points_refresh">
+       <property name="text">
+        <string>Refresh Avg Points</string>
+       </property>
+      </widget>
      </item>
     </layout>
    </widget>
