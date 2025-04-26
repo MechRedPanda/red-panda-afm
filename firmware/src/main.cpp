@@ -1,5 +1,4 @@
 #include "AD5761.hpp"
-#include "ads868x.hpp"
 #include "ads8681.hpp"
 #include <ArduinoJson.h>
 #include <atomic>
@@ -10,6 +9,156 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/portmacro.h"
+
+// ============================================================================
+// PID Controller Class
+// ============================================================================
+
+class PIDController
+{
+public:
+    PIDController(float kp = 1.0f, float ki = 0.0f, float kd = 0.0f,
+                  float integralMin = -50000.0f, float integralMax = 50000.0f,
+                  float slewRate = 1000000.0f)
+        : kp_(kp), ki_(ki), kd_(kd), integral_min_(integralMin),
+          integral_max_(integralMax), slew_rate_(slewRate)
+    {
+        reset();
+    }
+
+    void setTunings(float kp, float ki, float kd)
+    {
+        kp_ = kp;
+        ki_ = ki;
+        kd_ = kd;
+    }
+
+    void setOutputLimits(float min, float max)
+    {
+        output_min_ = min;
+        output_max_ = max;
+    }
+
+    void setIntegralLimits(float min, float max)
+    {
+        integral_min_ = min;
+        integral_max_ = max;
+    }
+
+    void setSlewRate(float rate)
+    {
+        slew_rate_ = rate;
+    }
+
+    void reset()
+    {
+        integral_ = 0;
+        last_error_ = 0;
+        last_feedback_ = 0;
+        last_output_ = 0;
+        last_time_ = 0;
+        filtered_d_term_ = 0;
+    }
+
+    float compute(float setpoint, float feedback)
+    {
+        uint32_t now = millis();
+        uint32_t dt = now - last_time_;
+        if (dt == 0)
+            return last_output_;
+
+        float error = setpoint - feedback;
+        if (invert_)
+            error = -error;
+
+        // Proportional term
+        float p_term = kp_ * error;
+
+        // Integral term with anti-windup
+        float pre_integral = integral_;
+        integral_ += ki_ * error * dt / 1000.0f;
+        integral_ = constrain(integral_, integral_min_, integral_max_);
+
+        // Back-calculation anti-windup
+        if (integral_ != pre_integral)
+        {
+            float windup = integral_ - pre_integral;
+            integral_ = pre_integral + windup * 0.5f; // Reduce windup effect
+        }
+
+        // Derivative term on process variable (not error) to reduce kicks
+        float d_term_raw = -kd_ * (feedback - last_feedback_) / (dt / 1000.0f);
+
+        // Low-pass filter on derivative term
+        filtered_d_term_ = alpha_ * filtered_d_term_ + (1.0f - alpha_) * d_term_raw;
+        float d_term = filtered_d_term_;
+
+        // Calculate output with bias
+        float pid_output = p_term + integral_ + d_term;
+        float desired_output = pid_output + bias_;
+
+        // Slew rate limiting
+        float max_change = slew_rate_ * dt / 1000.0f;
+        float delta = desired_output - last_output_;
+        if (abs(delta) > max_change)
+        {
+            delta = (delta > 0) ? max_change : -max_change;
+        }
+        float output = last_output_ + delta;
+
+        // Output limiting
+        output = constrain(output, output_min_, output_max_);
+
+        // Update state
+        last_error_ = error;
+        last_feedback_ = feedback;
+        last_output_ = output;
+        last_time_ = now;
+
+        return output;
+    }
+
+    void setInvert(bool invert) { invert_ = invert; }
+    void setBias(float bias) { bias_ = bias; }
+    void setAlpha(float alpha) { alpha_ = constrain(alpha, 0.0f, 1.0f); }
+
+    // Getter methods
+    float getKp() const { return kp_; }
+    float getKi() const { return ki_; }
+    float getKd() const { return kd_; }
+    float getIntegral() const { return integral_; }
+    float getBias() const { return bias_; }
+    float getCurrentOutput() const { return last_output_; }
+    bool getInvert() const { return invert_; }
+
+private:
+    // PID parameters
+    float kp_, ki_, kd_;
+    float integral_ = 0;
+    float last_error_ = 0;
+    float last_feedback_ = 0;
+    float last_output_ = 0;
+    uint32_t last_time_ = 0;
+
+    // Output limits
+    float output_min_ = 0;
+    float output_max_ = 65535;
+
+    // Integral limits
+    float integral_min_;
+    float integral_max_;
+
+    // Slew rate limit
+    float slew_rate_;
+
+    // Configuration
+    bool invert_ = false;
+    float bias_ = 0;
+
+    // Derivative filtering
+    float alpha_ = 0.2f; // Filter coefficient (0 < alpha < 1)
+    float filtered_d_term_ = 0;
+};
 
 // ============================================================================
 // Configuration
@@ -33,10 +182,10 @@
 static const int MAX_APPROACH_POINTS = 1000;
 #define MAX_ADC_AVG_WINDOW_SIZE 16 // Maximum ADC average window size
 
-#define DAC_Z_PROBE_TARGET 1000 // Fixed Z DAC value for probing (closer to 0)
-#define DAC_Z_RETRACT_TARGET (1<<15) // Fixed Z DAC value when retracted (mid-scale)
-#define Z_CYCLE_STEPS 1000 // Fixed number of steps for Z probe/retract cycle
-#define Z_STEP_DELAY_US 1 // Delay between Z DAC steps in approach cycle (us)
+#define DAC_Z_PROBE_TARGET 1000        // Fixed Z DAC value for probing (closer to 0)
+#define DAC_Z_RETRACT_TARGET (1 << 15) // Fixed Z DAC value when retracted (mid-scale)
+#define Z_CYCLE_STEPS 1000             // Fixed number of steps for Z probe/retract cycle
+#define Z_STEP_DELAY_US 1              // Delay between Z DAC steps in approach cycle (us)
 
 // ============================================================================
 // Hardware Configuration
@@ -98,7 +247,8 @@ enum class MotorStatus
 };
 
 // Approach Phase States (for Woodpecker)
-enum class ApproachPhase {
+enum class ApproachPhase
+{
     IDLE = 0,
     READY_TO_STEP = 1,
     STEPPING_MOTOR = 2,
@@ -147,21 +297,10 @@ struct AFMState
     int32_t timestamp = 0;
     SystemState current_state = SystemState::IDLE;
 
-    // PID Control Parameters
+    // PID Control
     bool pid_enabled = false;
     float pid_target = 0.0f;
-    float pid_kp = 1.0;
-    float pid_ki = 0.0;
-    float pid_kd = 0.0;
-    bool pid_invert = false;
-    float pid_integral = 0;
-    float pid_integral_min = -50000.0f; // Default limit
-    float pid_integral_max =  50000.0f; // Default limit
-    float pid_last_error = 0.0f;
-    uint32_t pid_last_time = 0;
-    float pid_slew_rate = 1000000.0; // Maximum change per second
-    float pid_last_output = 0;
-    float pid_bias = 0; // Initial bias value
+    PIDController pid_controller; // Using default constructor values
 
     // Approach Data
     struct ApproachData
@@ -182,8 +321,8 @@ struct AFMState
     int32_t approach_max_steps = 0;
     unsigned long approach_polling_interval = 50; // ms - NOTE: No longer used for blocking delay
     unsigned long approach_last_update = 0;
-    int32_t approach_last_stored_step = 0; // Track last stored step
-    unsigned int approach_step_delay = 500;    // Default step delay in microseconds (renamed from speed)
+    int32_t approach_last_stored_step = 0;  // Track last stored step
+    unsigned int approach_step_delay = 500; // Default step delay in microseconds (renamed from speed)
     int32_t approach_total_steps_taken = 0; // Track total steps taken
     // Z-cycle specific state
     // uint16_t dac_z_probe_target = DAC_Z_PROBE_TARGET; // REMOVED - Target Z DAC value for probing (closer to 0)
@@ -220,9 +359,9 @@ struct AFMState
     unsigned int scan_dwell_time = 1; // ms between points
 
     // Control Loop Timing - Switched to Period/Frequency Measurement
-    uint32_t control_loop_last_period_us = 0; // Period of the last full loop iteration
+    uint32_t control_loop_last_period_us = 0;  // Period of the last full loop iteration
     uint64_t control_loop_total_period_us = 0; // Use 64-bit to prevent quick overflow
-    uint32_t control_loop_count = 0;        // Count for averaging period
+    uint32_t control_loop_count = 0;           // Count for averaging period
 
     // DAC XY Ramping State
     bool ramp_active = false;
@@ -234,9 +373,9 @@ struct AFMState
     uint16_t ramp_start_z = 0; // Added Z ramp start
     int32_t ramp_delta_x = 0;
     int32_t ramp_delta_y = 0;
-    int32_t ramp_delta_z = 0; // Added Z ramp delta
-    int ramp_duration_ms = 1000;     // Default duration
-    int ramp_step_delay_ms = 1;    // Default step delay
+    int32_t ramp_delta_z = 0;    // Added Z ramp delta
+    int ramp_duration_ms = 1000; // Default duration
+    int ramp_step_delay_ms = 1;  // Default step delay
     int ramp_total_steps = 0;
     int ramp_current_step = 0;
     uint64_t ramp_next_step_time_us = 0; // Use microsecond timer
@@ -553,45 +692,12 @@ void updatePIDControl()
     if (!current_afm_state.pid_enabled)
         return;
 
-    uint32_t current_time = millis();
-    uint32_t dt = current_time - current_afm_state.pid_last_time;
-    if (dt == 0)
-        return;
+    float output = current_afm_state.pid_controller.compute(
+        current_afm_state.pid_target,
+        current_afm_state.adc_0_avg);
 
-    // Calculate error using average ADC value
-    float error = current_afm_state.pid_target - current_afm_state.adc_0_avg; // Use average ADC
-    if (current_afm_state.pid_invert)
-        error = -error;
-
-    // Calculate PID terms
-    float p_term = current_afm_state.pid_kp * error;
-    current_afm_state.pid_integral += current_afm_state.pid_ki * error * dt / 1000.0;
-    // Clamp the integral term
-    current_afm_state.pid_integral = constrain(current_afm_state.pid_integral, current_afm_state.pid_integral_min, current_afm_state.pid_integral_max);
-    float d_term = current_afm_state.pid_kd * (error - current_afm_state.pid_last_error) / (dt / 1000.0);
-
-    // Calculate output
-    float pid_output = p_term + current_afm_state.pid_integral + d_term;
-    float desired_output = pid_output + current_afm_state.pid_bias;
-
-    // Apply slew rate limiting
-    float max_change = current_afm_state.pid_slew_rate * dt / 1000.0;
-    float delta = desired_output - current_afm_state.pid_last_output;
-    if (abs(delta) > max_change)
-    {
-        delta = (delta > 0) ? max_change : -max_change;
-    }
-    float output = current_afm_state.pid_last_output + delta;
-
-    // Clamp and update
-    output = constrain(output, 0, 65535);
     dac_z.write(static_cast<uint16_t>(output));
     current_afm_state.dac_z_val = static_cast<uint16_t>(output);
-
-    // Update state
-    current_afm_state.pid_last_error = error;
-    current_afm_state.pid_last_time = current_time;
-    current_afm_state.pid_last_output = output;
 }
 
 // ============================================================================
@@ -606,7 +712,7 @@ bool startApproach(uint8_t motor, int step_size, uint16_t threshold, int32_t max
     if (isMotorMoving() || current_afm_state.approach_running || current_afm_state.scan_active)
         return false; // Prevent starting if busy
 
-    // --- Initialize Approach State --- 
+    // --- Initialize Approach State ---
     current_afm_state.current_state = SystemState::APPROACHING;
     current_afm_state.approach_running = true; // Set flag to true to enable updateApproach logic
     current_afm_state.approach_motor = motor;
@@ -617,7 +723,7 @@ bool startApproach(uint8_t motor, int step_size, uint16_t threshold, int32_t max
     current_afm_state.approach_step_delay = delay_val;
     current_afm_state.approach_total_steps_taken = 0;
     current_afm_state.approach_data_count = 0; // Clear previous data
-    current_afm_state.ramp_active = false; // Ensure Z ramp isn't active initially
+    current_afm_state.ramp_active = false;     // Ensure Z ramp isn't active initially
 
     // Get initial ADC value (update state first)
     updateAFMState();
@@ -629,19 +735,19 @@ bool startApproach(uint8_t motor, int step_size, uint16_t threshold, int32_t max
     current_afm_state.dac_z_val = DAC_Z_RETRACT_TARGET;
 
     // Log initial data point
-    if (current_afm_state.approach_data_count < MAX_APPROACH_POINTS) {
+    if (current_afm_state.approach_data_count < MAX_APPROACH_POINTS)
+    {
         current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
             current_afm_state.approach_total_steps_taken,
             current_afm_state.approach_initial_adc,
-            current_afm_state.approach_initial_position
-        };
+            current_afm_state.approach_initial_position};
     }
-    
-    // --- Removed blocking loop --- 
+
+    // --- Removed blocking loop ---
     // bool threshold_met = false;
     // while (current_afm_state.approach_running) { ... loop content removed ... }
-    // --- Removed Cleanup --- 
-    // current_afm_state.approach_running = false; 
+    // --- Removed Cleanup ---
+    // current_afm_state.approach_running = false;
     // current_afm_state.current_state = SystemState::IDLE;
     // return threshold_met;
 
@@ -656,8 +762,9 @@ void stopApproach()
         current_afm_state.approach_running = false;
 
         // Only change system state if it was APPROACHING
-        if (current_afm_state.current_state == SystemState::APPROACHING) {
-             current_afm_state.current_state = SystemState::IDLE;
+        if (current_afm_state.current_state == SystemState::APPROACHING)
+        {
+            current_afm_state.current_state = SystemState::IDLE;
         }
     }
 }
@@ -668,7 +775,7 @@ void updateApproach()
     if (!current_afm_state.approach_running)
         return; // Not active, do nothing
 
-    // --- Preliminary Checks --- 
+    // --- Preliminary Checks ---
     if (current_afm_state.approach_total_steps_taken >= current_afm_state.approach_max_steps)
     {
         stopApproach(); // Max steps reached
@@ -682,29 +789,30 @@ void updateApproach()
         return;
     }
 
-    // --- Perform Blocking Motor Step --- 
+    // --- Perform Blocking Motor Step ---
     bool motor_success = moveMotorBlocking(
         current_afm_state.approach_motor,
         current_afm_state.approach_step_size,
         current_afm_state.approach_direction,
         current_afm_state.approach_step_delay);
-    
+
     if (!motor_success)
     {
         stopApproach(); // Failed to move motor
         return;
     }
 
-    // --- Blocking Settle Delay --- 
+    // --- Blocking Settle Delay ---
     delay(current_afm_state.approach_polling_interval);
 
-    // --- Blocking Z-Probe Cycle --- 
+    // --- Blocking Z-Probe Cycle ---
     bool threshold_met_during_probe = false;
     uint16_t start_z = DAC_Z_RETRACT_TARGET;
     uint16_t target_z = DAC_Z_PROBE_TARGET;
     int32_t delta_z = (int32_t)target_z - (int32_t)start_z;
     int total_steps = Z_CYCLE_STEPS;
-    if (total_steps <= 0) total_steps = 1;
+    if (total_steps <= 0)
+        total_steps = 1;
     uint64_t next_step_time_us = esp_timer_get_time();
 
     for (int i = 1; i <= total_steps; ++i)
@@ -714,8 +822,10 @@ void updateApproach()
 
         // Calculate next Z
         int64_t intermediate_z = (int64_t)start_z + ((int64_t)delta_z * i) / total_steps;
-        if (intermediate_z < 0) intermediate_z = 0;
-        if (intermediate_z > 65535) intermediate_z = 65535;
+        if (intermediate_z < 0)
+            intermediate_z = 0;
+        if (intermediate_z > 65535)
+            intermediate_z = 65535;
         uint16_t next_z = (uint16_t)intermediate_z;
 
         // Write Z DAC
@@ -723,7 +833,7 @@ void updateApproach()
         current_afm_state.dac_z_val = next_z;
 
         // Update ADC State & Check Threshold
-        updateAFMState(); 
+        updateAFMState();
         if (abs(current_afm_state.adc_0_avg - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold)
         {
             threshold_met_during_probe = true;
@@ -731,35 +841,35 @@ void updateApproach()
         }
     }
     // Ensure final target is reached if loop completed normally
-    if (!threshold_met_during_probe && current_afm_state.dac_z_val != target_z) {
-         dac_z.write(target_z);
-         current_afm_state.dac_z_val = target_z;
-         updateAFMState(); // Update state one last time at the probe target
-         // Check threshold one last time at the very end of probe travel
-         if (abs(current_afm_state.adc_0_avg - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold)
-         {
+    if (!threshold_met_during_probe && current_afm_state.dac_z_val != target_z)
+    {
+        dac_z.write(target_z);
+        current_afm_state.dac_z_val = target_z;
+        updateAFMState(); // Update state one last time at the probe target
+        // Check threshold one last time at the very end of probe travel
+        if (abs(current_afm_state.adc_0_avg - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold)
+        {
             threshold_met_during_probe = true;
-         }
+        }
     }
 
-    // --- Handle Probe Result --- 
+    // --- Handle Probe Result ---
     if (threshold_met_during_probe)
-    {   
+    {
         // Log final data point where threshold was met
         if (current_afm_state.approach_data_count < MAX_APPROACH_POINTS)
         {
             current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
                 current_afm_state.approach_total_steps_taken + current_afm_state.approach_step_size, // Log steps *including* this one
-                current_afm_state.adc_0_avg, 
-                current_afm_state.motors[current_afm_state.approach_motor - 1].current_position
-            };
+                current_afm_state.adc_0_avg,
+                current_afm_state.motors[current_afm_state.approach_motor - 1].current_position};
         }
         stopApproach(); // Threshold met
         return;
     }
     else
     {
-        // --- Blocking Z-Retract Cycle --- 
+        // --- Blocking Z-Retract Cycle ---
         start_z = DAC_Z_PROBE_TARGET; // Start from probe position
         target_z = DAC_Z_RETRACT_TARGET;
         delta_z = (int32_t)target_z - (int32_t)start_z;
@@ -768,23 +878,26 @@ void updateApproach()
 
         for (int i = 1; i <= total_steps; ++i) // Use the same total_steps
         {
-             delayMicroseconds(Z_STEP_DELAY_US);
+            delayMicroseconds(Z_STEP_DELAY_US);
 
             int64_t intermediate_z = (int64_t)start_z + ((int64_t)delta_z * i) / total_steps;
-            if (intermediate_z < 0) intermediate_z = 0;
-            if (intermediate_z > 65535) intermediate_z = 65535;
+            if (intermediate_z < 0)
+                intermediate_z = 0;
+            if (intermediate_z > 65535)
+                intermediate_z = 65535;
             uint16_t next_z = (uint16_t)intermediate_z;
 
             dac_z.write(next_z);
             current_afm_state.dac_z_val = next_z;
         }
-         // Ensure final retract target is reached
-        if (current_afm_state.dac_z_val != target_z) {
-             dac_z.write(target_z);
-             current_afm_state.dac_z_val = target_z;
+        // Ensure final retract target is reached
+        if (current_afm_state.dac_z_val != target_z)
+        {
+            dac_z.write(target_z);
+            current_afm_state.dac_z_val = target_z;
         }
 
-        // --- Log Data & Increment Step Count (after successful Z cycle) --- 
+        // --- Log Data & Increment Step Count (after successful Z cycle) ---
         current_afm_state.approach_total_steps_taken += current_afm_state.approach_step_size;
         if (current_afm_state.approach_data_count < MAX_APPROACH_POINTS)
         {
@@ -792,8 +905,7 @@ void updateApproach()
             current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
                 current_afm_state.approach_total_steps_taken,
                 current_afm_state.adc_0_avg, // This holds the value from the end of the probe
-                current_afm_state.motors[current_afm_state.approach_motor - 1].current_position
-            };
+                current_afm_state.motors[current_afm_state.approach_motor - 1].current_position};
         }
         else
         {
@@ -801,7 +913,7 @@ void updateApproach()
             return;
         }
 
-        // --- Final Check after Step Cycle --- 
+        // --- Final Check after Step Cycle ---
         if (current_afm_state.approach_total_steps_taken >= current_afm_state.approach_max_steps)
         {
             stopApproach(); // Max steps reached
@@ -873,19 +985,23 @@ uint16_t calculateDacValue(uint16_t start, uint16_t end, uint16_t index, uint16_
 void sendScanDataBuffer();
 
 // Function to update DAC ramping state machine
-void updateDacRamp() {
-    if (!current_afm_state.ramp_active) {
+void updateDacRamp()
+{
+    if (!current_afm_state.ramp_active)
+    {
         return;
     }
 
     // Check if this ramp is for Z (handled by updateZramp in approach)
     // Add a simple check: if delta_z is non-zero, it's likely a Z ramp.
     // A more robust method might involve a dedicated flag.
-    if (current_afm_state.ramp_delta_z != 0) {
-         // This assumes ramps are either XY or Z, not XYZ.
-         // If Z is ramping, let updateZramp handle it during approach.
-        if (current_afm_state.current_state == SystemState::APPROACHING) {
-             return;
+    if (current_afm_state.ramp_delta_z != 0)
+    {
+        // This assumes ramps are either XY or Z, not XYZ.
+        // If Z is ramping, let updateZramp handle it during approach.
+        if (current_afm_state.current_state == SystemState::APPROACHING)
+        {
+            return;
         }
         // If not approaching, but Z ramp is active (e.g., manual Z move command needed)
         // then call updateZramp or integrate Z logic here. For now, we assume
@@ -893,11 +1009,11 @@ void updateDacRamp() {
         // If non-approach Z ramps are needed, integrate updateZramp logic here.
     }
 
-
     // Proceed with XY ramp logic (only if ramp_delta_z is zero or not approaching)
     uint64_t current_time_us = esp_timer_get_time();
 
-    if (current_time_us >= current_afm_state.ramp_next_step_time_us) {
+    if (current_time_us >= current_afm_state.ramp_next_step_time_us)
+    {
         // Increment step
         current_afm_state.ramp_current_step++;
 
@@ -905,32 +1021,37 @@ void updateDacRamp() {
         uint16_t next_y;
 
         // Check if ramp is complete
-        if (current_afm_state.ramp_current_step >= current_afm_state.ramp_total_steps) {
+        if (current_afm_state.ramp_current_step >= current_afm_state.ramp_total_steps)
+        {
             next_x = current_afm_state.ramp_target_x;
             next_y = current_afm_state.ramp_target_y;
             current_afm_state.ramp_active = false; // Mark ramp as complete
-        } else {
+        }
+        else
+        {
             // Calculate intermediate values using integer math
-             next_x = current_afm_state.ramp_start_x + ((int64_t)current_afm_state.ramp_delta_x * current_afm_state.ramp_current_step) / current_afm_state.ramp_total_steps;
-             next_y = current_afm_state.ramp_start_y + ((int64_t)current_afm_state.ramp_delta_y * current_afm_state.ramp_current_step) / current_afm_state.ramp_total_steps;
+            next_x = current_afm_state.ramp_start_x + ((int64_t)current_afm_state.ramp_delta_x * current_afm_state.ramp_current_step) / current_afm_state.ramp_total_steps;
+            next_y = current_afm_state.ramp_start_y + ((int64_t)current_afm_state.ramp_delta_y * current_afm_state.ramp_current_step) / current_afm_state.ramp_total_steps;
         }
 
         // Write values if changed
         bool xy_changed = false;
-        if (next_x != current_afm_state.dac_x_val) {
+        if (next_x != current_afm_state.dac_x_val)
+        {
             dac_x.write(next_x);
             current_afm_state.dac_x_val = next_x;
             xy_changed = true;
         }
-         if (next_y != current_afm_state.dac_y_val) {
+        if (next_y != current_afm_state.dac_y_val)
+        {
             dac_y.write(next_y);
             current_afm_state.dac_y_val = next_y;
             xy_changed = true;
         }
 
-
         // If ramp is still active, schedule next step
-        if (current_afm_state.ramp_active) {
+        if (current_afm_state.ramp_active)
+        {
             current_afm_state.ramp_next_step_time_us = current_time_us + (uint64_t)current_afm_state.ramp_step_delay_ms * 1000;
         }
     }
@@ -940,8 +1061,10 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
                uint16_t resolution, unsigned int dwell_time)
 {
     // Basic validation
-    if (resolution < 2) return false;
-    if (x_start > x_end || y_start > y_end) return false;
+    if (resolution < 2)
+        return false;
+    if (x_start > x_end || y_start > y_end)
+        return false;
     // Prevent starting if already scanning, moving, approaching, OR RAMPING
     if (current_afm_state.scan_active || isMotorMoving() || current_afm_state.approach_running || current_afm_state.ramp_active)
         return false;
@@ -973,7 +1096,8 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
     uint16_t current_y = current_afm_state.dac_y_val;
 
     // --- Initiate Ramp if needed ---
-    if (current_x != target_x || current_y != target_y) {
+    if (current_x != target_x || current_y != target_y)
+    {
         current_afm_state.ramp_target_x = target_x;
         current_afm_state.ramp_target_y = target_y;
         current_afm_state.ramp_start_x = current_x;
@@ -983,23 +1107,28 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
         // Use default duration/step for now, could be made parameters later
         current_afm_state.ramp_duration_ms = 1000;
         current_afm_state.ramp_step_delay_ms = 1;
-        if (current_afm_state.ramp_step_delay_ms < 1) current_afm_state.ramp_step_delay_ms = 1; // Sanity check
+        if (current_afm_state.ramp_step_delay_ms < 1)
+            current_afm_state.ramp_step_delay_ms = 1; // Sanity check
         current_afm_state.ramp_total_steps = current_afm_state.ramp_duration_ms / current_afm_state.ramp_step_delay_ms;
 
-        if (current_afm_state.ramp_total_steps > 0) {
-             current_afm_state.ramp_current_step = 0;
-             current_afm_state.ramp_next_step_time_us = esp_timer_get_time() + (uint64_t)current_afm_state.ramp_step_delay_ms * 1000;
-             current_afm_state.ramp_active = true;
-        } else {
-             // Duration or step too small, just jump
-             dac_x.write(target_x);
-             dac_y.write(target_y);
-             current_afm_state.dac_x_val = target_x;
-             current_afm_state.dac_y_val = target_y;
-             current_afm_state.ramp_active = false;
+        if (current_afm_state.ramp_total_steps > 0)
+        {
+            current_afm_state.ramp_current_step = 0;
+            current_afm_state.ramp_next_step_time_us = esp_timer_get_time() + (uint64_t)current_afm_state.ramp_step_delay_ms * 1000;
+            current_afm_state.ramp_active = true;
         }
-
-    } else {
+        else
+        {
+            // Duration or step too small, just jump
+            dac_x.write(target_x);
+            dac_y.write(target_y);
+            current_afm_state.dac_x_val = target_x;
+            current_afm_state.dac_y_val = target_y;
+            current_afm_state.ramp_active = false;
+        }
+    }
+    else
+    {
         // Already at the target, no ramp needed
         current_afm_state.ramp_active = false;
         // Ensure state is correct even if no ramp occurred
@@ -1015,7 +1144,6 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
     current_afm_state.scan_active = true;
     current_afm_state.current_state = SystemState::SCANNING;
 
-
     // NOTE: No delay here anymore, scan starts logically,
     // but actual movement might be delayed by ramp.
     // First point acquisition in updateScan will wait for dwell time anyway.
@@ -1027,8 +1155,9 @@ void updateScan()
 {
     if (!current_afm_state.scan_active)
         return;
-    
-    if (current_afm_state.ramp_active) {
+
+    if (current_afm_state.ramp_active)
+    {
         return;
     }
 
@@ -1349,7 +1478,8 @@ JsonDocument getAFMStateAsJson()
     // Control Loop Timing (Frequency)
     doc["loop_last_period_us"] = current_afm_state.control_loop_last_period_us;
     float last_freq_hz = 0.0f;
-    if (current_afm_state.control_loop_last_period_us > 0) {
+    if (current_afm_state.control_loop_last_period_us > 0)
+    {
         last_freq_hz = 1000000.0f / current_afm_state.control_loop_last_period_us;
     }
     doc["loop_last_freq_hz"] = last_freq_hz;
@@ -1358,8 +1488,9 @@ JsonDocument getAFMStateAsJson()
     if (current_afm_state.control_loop_count > 0)
     {
         float avg_period_us = (float)current_afm_state.control_loop_total_period_us / current_afm_state.control_loop_count;
-        if (avg_period_us > 0) {
-             avg_freq_hz = 1000000.0f / avg_period_us;
+        if (avg_period_us > 0)
+        {
+            avg_freq_hz = 1000000.0f / avg_period_us;
         }
     }
     doc["loop_avg_freq_hz"] = avg_freq_hz;
@@ -1566,37 +1697,51 @@ String processCommand(const String &json_command)
         else if (doc["action"] == "set_params")
         {
             bool target_updated = false;
-            // Handle target parameter (integer only now) - use recommended check
             if (doc["target"].is<int>())
             {
-                // Assign to float state variable (implicit conversion is fine)
                 current_afm_state.pid_target = doc["target"].as<float>();
-                // Reset state only when target is explicitly set
-                current_afm_state.pid_integral = 0;
-                current_afm_state.pid_last_error = 0.0f;
-                current_afm_state.pid_last_time = millis(); // Reset time reference
-                current_afm_state.pid_last_output = current_afm_state.dac_z_val; // Start from current output
-                current_afm_state.pid_bias = current_afm_state.dac_z_val; // Set bias to current output
+                // Reset PID controller state and set initial bias to current Z value
+                current_afm_state.pid_controller.reset();
+                current_afm_state.pid_controller.setBias(current_afm_state.dac_z_val);
                 target_updated = true;
             }
 
             // Handle other parameters (Kp, Ki, Kd, etc.)
-            current_afm_state.pid_kp = doc["kp"] | current_afm_state.pid_kp;
-            current_afm_state.pid_ki = doc["ki"] | current_afm_state.pid_ki;
-            current_afm_state.pid_kd = doc["kd"] | current_afm_state.pid_kd;
-            current_afm_state.pid_invert = doc["invert"] | current_afm_state.pid_invert;
-            current_afm_state.pid_slew_rate = doc["slew_rate"] | current_afm_state.pid_slew_rate;
-            // Add integral limits (handle potential float/int) - use recommended check
-            if (doc["integral_min"].is<float>() || doc["integral_min"].is<int>()) {
-                 current_afm_state.pid_integral_min = doc["integral_min"].as<float>();
-            }
-            if (doc["integral_max"].is<float>() || doc["integral_max"].is<int>()) {
-                 current_afm_state.pid_integral_max = doc["integral_max"].as<float>();
+            if (doc["kp"].is<float>() || doc["kp"].is<int>() ||
+                doc["ki"].is<float>() || doc["ki"].is<int>() ||
+                doc["kd"].is<float>() || doc["kd"].is<int>())
+            {
+                float kp = doc["kp"] | current_afm_state.pid_controller.getKp();
+                float ki = doc["ki"] | current_afm_state.pid_controller.getKi();
+                float kd = doc["kd"] | current_afm_state.pid_controller.getKd();
+                current_afm_state.pid_controller.setTunings(kp, ki, kd);
             }
 
-            // Only update bias if target was NOT updated in this command
-            if (!target_updated) {
-                current_afm_state.pid_bias = doc["bias"] | current_afm_state.pid_bias;
+            // Handle slew rate
+            if (doc["slew_rate"].is<float>() || doc["slew_rate"].is<int>())
+            {
+                current_afm_state.pid_controller.setSlewRate(doc["slew_rate"].as<float>());
+            }
+
+            // Handle integral limits
+            if ((doc["integral_min"].is<float>() || doc["integral_min"].is<int>()) &&
+                (doc["integral_max"].is<float>() || doc["integral_max"].is<int>()))
+            {
+                float min_val = doc["integral_min"].as<float>();
+                float max_val = doc["integral_max"].as<float>();
+                current_afm_state.pid_controller.setIntegralLimits(min_val, max_val);
+            }
+
+            // Handle invert flag
+            if (doc["invert"].is<bool>())
+            {
+                current_afm_state.pid_controller.setInvert(doc["invert"].as<bool>());
+            }
+
+            // Only update bias if target was NOT updated
+            if (!target_updated && (doc["bias"].is<float>() || doc["bias"].is<int>()))
+            {
+                current_afm_state.pid_controller.setBias(doc["bias"].as<float>());
             }
 
             response["status"] = "success";
@@ -1606,16 +1751,14 @@ String processCommand(const String &json_command)
         {
             response["enabled"] = current_afm_state.pid_enabled;
             response["target"] = current_afm_state.pid_target;
-            response["kp"] = current_afm_state.pid_kp;
-            response["ki"] = current_afm_state.pid_ki;
-            response["kd"] = current_afm_state.pid_kd;
-            response["invert"] = current_afm_state.pid_invert;
-            response["slew_rate"] = current_afm_state.pid_slew_rate;
-            response["bias"] = current_afm_state.pid_bias;
-            response["integral_min"] = current_afm_state.pid_integral_min;
-            response["integral_max"] = current_afm_state.pid_integral_max;
-            response["current_integral"] = current_afm_state.pid_integral;
-            response["current_value"] = current_afm_state.adc_0_avg; // Use average ADC
+            response["kp"] = current_afm_state.pid_controller.getKp();
+            response["ki"] = current_afm_state.pid_controller.getKi();
+            response["kd"] = current_afm_state.pid_controller.getKd();
+            response["bias"] = current_afm_state.pid_controller.getBias();
+            response["invert"] = current_afm_state.pid_controller.getInvert();
+            response["current_integral"] = current_afm_state.pid_controller.getIntegral();
+            response["current_output"] = current_afm_state.pid_controller.getCurrentOutput();
+            response["current_value"] = current_afm_state.adc_0_avg;
             response["output"] = current_afm_state.dac_z_val;
             response["status"] = "success";
         }
@@ -1691,10 +1834,10 @@ String processCommand(const String &json_command)
         else if (doc["action"] == "stop")
         {
             // Signal the background process (updateApproach) to stop
-            stopApproach(); // Calls the flag-setting function
+            stopApproach();                  // Calls the flag-setting function
             response["status"] = "stopping"; // Indicate stop was requested
             // Optional: Add check if it was already stopped
-            // if (!current_afm_state.approach_running && current_afm_state.current_state != SystemState::APPROACHING) { 
+            // if (!current_afm_state.approach_running && current_afm_state.current_state != SystemState::APPROACHING) {
             //     response["message"] = "Approach not running.";
             // }
         }
@@ -1818,7 +1961,7 @@ String processCommand(const String &json_command)
     }
     else if (strcmp(command, "set_adc_avg_window") == 0)
     {
-        const auto& window_size_param = doc["window_size"];
+        const auto &window_size_param = doc["window_size"];
         if (!window_size_param.is<int>())
         {
             response["status"] = "error";
@@ -1862,12 +2005,38 @@ String processCommand(const String &json_command)
 // ============================================================================
 
 TaskHandle_t control_task_handle;
+TaskHandle_t pid_task_handle;
+
+void pidControlTask(void *parameter)
+{
+    // Subscribe this task to the Task Watchdog Timer
+    esp_task_wdt_add(NULL);
+
+    TickType_t xLastWakeTime;
+    const TickType_t xFrequency = pdMS_TO_TICKS(1); // 1ms period for 1kHz control loop
+    xLastWakeTime = xTaskGetTickCount();
+
+    while (1)
+    {
+        // Wait for the next cycle using vTaskDelayUntil for precise timing
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+
+        // Only update ADC and PID if PID is enabled
+        if (current_afm_state.pid_enabled)
+        {
+            updateAFMState(); // Get latest ADC reading
+            updatePIDControl();
+        }
+
+        // Reset watchdog
+        esp_task_wdt_reset();
+    }
+}
 
 void controlTask(void *parameter)
 {
     // Subscribe this task to the Task Watchdog Timer
-    // esp_task_wdt_init(WDT_TIMEOUT_S, true); // Enable panic WDT
-    esp_task_wdt_add(NULL); // Add current task to WDT watch
+    esp_task_wdt_add(NULL);
 
     // Variable to store the start time of the previous iteration
     static uint64_t lastStartTime = 0;
@@ -1879,8 +2048,9 @@ void controlTask(void *parameter)
         uint64_t currentStartTime = esp_timer_get_time();
         uint32_t period_us = 0;
 
-        if (lastStartTime != 0) { // Calculate period after the first iteration
-             period_us = (uint32_t)(currentStartTime - lastStartTime);
+        if (lastStartTime != 0)
+        { // Calculate period after the first iteration
+            period_us = (uint32_t)(currentStartTime - lastStartTime);
 
             // Update state for averaging
             current_afm_state.control_loop_last_period_us = period_us;
@@ -1900,25 +2070,28 @@ void controlTask(void *parameter)
 
         // Perform control actions (Execution time of these does not affect frequency measurement)
         updateMotorMovement();
-        updateDacRamp(); // Handles XY ramps (and potentially non-approach Z)
-        // Z ramp during approach is handled within updateApproach calling updateZramp
-        updatePIDControl();
+        updateDacRamp();  // Handles XY ramps (and potentially non-approach Z)
         updateApproach(); // Handles approach state machine, including calling updateZramp
         updateScan();
-        updateAFMState(); // Reads ADCs, updates averages
 
+        // Only update AFM state if PID is not enabled (PID task handles it otherwise)
+        if (!current_afm_state.pid_enabled)
+        {
+            updateAFMState();
+        }
 
         // Reset the WDT after completing the work for this cycle
         esp_task_wdt_reset();
 
         // Small delay/yield to prevent WDT issues on very fast loops and allow lower priority tasks
-        // Adjust delay based on measured loop frequency if needed
-        // If loop frequency is > 10kHz, a small delay might be beneficial
-         if (current_afm_state.control_loop_last_period_us < 100) { // e.g., faster than 10kHz
+        if (current_afm_state.control_loop_last_period_us < 100)
+        {                                 // e.g., faster than 10kHz
             vTaskDelay(pdMS_TO_TICKS(1)); // Yield for 1ms
-         } else {
-             taskYIELD(); // Yield briefly if loop is slower
-         }
+        }
+        else
+        {
+            taskYIELD(); // Yield briefly if loop is slower
+        }
     }
 }
 
@@ -1928,14 +2101,13 @@ void controlTask(void *parameter)
 
 void setup()
 {
-    disableCore0WDT();  // Only if your task is pinned to core 0
+    disableCore0WDT(); // Only if your task is pinned to core 0
+
     // Create the mutex for scan buffer protection
     scan_buffer_mutex = xSemaphoreCreateMutex();
     if (scan_buffer_mutex == NULL)
     {
-        // Handle mutex creation failure (may want to set an error state)
         Serial.println("Error: Failed to create scan buffer mutex!");
-        // Consider halting or indicating error state
     }
 
     scan_data_ready_to_send.store(false); // Initialize atomic flag
@@ -1950,15 +2122,27 @@ void setup()
     while (!Serial)
         delay(1);
 
-    // Create control task
+    // Create PID control task with higher priority than main control task
+    xTaskCreatePinnedToCore(
+        pidControlTask,
+        "PIDTask",
+        4096,
+        NULL,
+        configMAX_PRIORITIES - 1, // Highest priority
+        &pid_task_handle,
+        1 // Run on core 1
+    );
+
+    // Create main control task
     xTaskCreatePinnedToCore(
         controlTask,
         "ControlTask",
         4096,
         NULL,
-        configMAX_PRIORITIES - 2,
+        configMAX_PRIORITIES - 2, // Lower priority than PID
         &control_task_handle,
-        0);
+        0 // Run on core 0
+    );
 }
 
 void loop()
