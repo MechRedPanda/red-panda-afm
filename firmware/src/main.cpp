@@ -1,6 +1,6 @@
-#include <Arduino.h>
 #include "AD5761.hpp"
 #include "ads868x.hpp"
+#include "ads8681.hpp"
 #include <ArduinoJson.h>
 #include <atomic>
 #include "esp_task_wdt.h"
@@ -32,6 +32,11 @@
 // ============================================================================
 static const int MAX_APPROACH_POINTS = 1000;
 #define MAX_ADC_AVG_WINDOW_SIZE 16 // Maximum ADC average window size
+
+#define DAC_Z_PROBE_TARGET 1000 // Fixed Z DAC value for probing (closer to 0)
+#define DAC_Z_RETRACT_TARGET (1<<15) // Fixed Z DAC value when retracted (mid-scale)
+#define Z_CYCLE_STEPS 1000 // Fixed number of steps for Z probe/retract cycle
+#define Z_STEP_DELAY_US 1 // Delay between Z DAC steps in approach cycle (us)
 
 // ============================================================================
 // Hardware Configuration
@@ -68,8 +73,8 @@ AD5761 dac_y = AD5761(&driver_spi, 2, 0b0000000101000);
 AD5761 dac_z = AD5761(&driver_spi, 4, 0b0000000101000);
 
 // ADC Instances
-ADC_ads868x adc_0 = ADC_ads868x(&opu_spi, 1, 21, 0x0004);
-ADC_ads868x adc_1 = ADC_ads868x(&opu_spi, 1, 5, 0x0003);
+ADC_ads8681 adc_0 = ADC_ads8681(&opu_spi, 21, 0x0004);
+ADC_ads8681 adc_1 = ADC_ads8681(&opu_spi, 5, 0x0003);
 
 // ============================================================================
 // State Definitions
@@ -92,6 +97,18 @@ enum class MotorStatus
     ERROR = 2
 };
 
+// Approach Phase States (for Woodpecker)
+enum class ApproachPhase {
+    IDLE = 0,
+    READY_TO_STEP = 1,
+    STEPPING_MOTOR = 2,
+    READY_TO_PROBE = 3,
+    Z_PROBING = 4,
+    Z_RETRACTING = 5,
+    INTERACTION_FOUND = 6,
+    FINISHED_MAX_STEPS = 7
+};
+
 // Motor State Structure
 struct MotorState
 {
@@ -105,12 +122,12 @@ struct MotorState
 // AFM System State Structure
 struct AFMState
 {
-    // DAC/ADC Values
-    uint16_t dac_f_val = 0;
-    uint16_t dac_t_val = 0;
-    uint16_t dac_x_val = 0;
-    uint16_t dac_y_val = 0;
-    uint16_t dac_z_val = 0;
+    // DAC/ADC Values - Default DAC values set to mid-scale (0V)
+    uint16_t dac_f_val = (1 << 15);
+    uint16_t dac_t_val = (1 << 15);
+    uint16_t dac_x_val = (1 << 15);
+    uint16_t dac_y_val = (1 << 15);
+    uint16_t dac_z_val = (1 << 15);
     uint16_t adc_0_val = 0;
     uint16_t adc_1_val = 0;
 
@@ -163,10 +180,15 @@ struct AFMState
     float approach_initial_adc = 0.0f;
     int32_t approach_initial_position = 0;
     int32_t approach_max_steps = 0;
-    unsigned long approach_polling_interval = 50; // ms
+    unsigned long approach_polling_interval = 50; // ms - NOTE: No longer used for blocking delay
     unsigned long approach_last_update = 0;
     int32_t approach_last_stored_step = 0; // Track last stored step
-    unsigned int approach_speed = 500;     // Default step delay in microseconds
+    unsigned int approach_step_delay = 500;    // Default step delay in microseconds (renamed from speed)
+    int32_t approach_total_steps_taken = 0; // Track total steps taken
+    // Z-cycle specific state
+    // uint16_t dac_z_probe_target = DAC_Z_PROBE_TARGET; // REMOVED - Target Z DAC value for probing (closer to 0)
+    // uint16_t dac_z_retract_target = DAC_Z_RETRACT_TARGET; // REMOVED - Target Z DAC value when retracted (mid-scale)
+    // int z_cycle_steps = 100; // REMOVED - Number of steps for Z probe/retract cycle
 
     // Scan Data & State (using Ring Buffer)
     struct ScanPoint
@@ -206,10 +228,13 @@ struct AFMState
     bool ramp_active = false;
     uint16_t ramp_target_x = 0;
     uint16_t ramp_target_y = 0;
+    uint16_t ramp_target_z = 0; // Added Z ramp target
     uint16_t ramp_start_x = 0;
     uint16_t ramp_start_y = 0;
+    uint16_t ramp_start_z = 0; // Added Z ramp start
     int32_t ramp_delta_x = 0;
     int32_t ramp_delta_y = 0;
+    int32_t ramp_delta_z = 0; // Added Z ramp delta
     int ramp_duration_ms = 1000;     // Default duration
     int ramp_step_delay_ms = 1;    // Default step delay
     int ramp_total_steps = 0;
@@ -573,111 +598,216 @@ void updatePIDControl()
 // Approach Control Functions
 // ============================================================================
 
-bool startApproach(uint8_t motor, int step_size, uint16_t threshold, int32_t max_steps, unsigned int speed = 500)
+// Non-blocking approach initialization function
+bool startApproach(uint8_t motor, int step_size, uint16_t threshold, int32_t max_steps, unsigned int delay_val = 500)
 {
-    if (motor < 1 || motor > 3)
-        return false;
-    if (step_size == 0)
-        return false;
-    if (threshold <= 0)
-        return false;
-    if (max_steps == 0)
-        return false; // max_steps must be non-zero
-    if (current_afm_state.approach_running)
-        return false;
-    if (isMotorMoving())
-        return false;
+    if (motor < 1 || motor > 3 || step_size == 0 || threshold <= 0 || max_steps == 0)
+        return false; // Basic validation
+    if (isMotorMoving() || current_afm_state.approach_running || current_afm_state.scan_active)
+        return false; // Prevent starting if busy
 
-    // Clear previous approach data
-    current_afm_state.approach_data_count = 0;
+    // --- Initialize Approach State --- 
+    current_afm_state.current_state = SystemState::APPROACHING;
+    current_afm_state.approach_running = true; // Set flag to true to enable updateApproach logic
+    current_afm_state.approach_motor = motor;
+    current_afm_state.approach_step_size = abs(step_size);
+    current_afm_state.approach_direction = max_steps > 0 ? 1 : 0;
+    current_afm_state.approach_threshold = threshold;
+    current_afm_state.approach_max_steps = abs(max_steps);
+    current_afm_state.approach_step_delay = delay_val;
+    current_afm_state.approach_total_steps_taken = 0;
+    current_afm_state.approach_data_count = 0; // Clear previous data
+    current_afm_state.ramp_active = false; // Ensure Z ramp isn't active initially
 
-    // Get initial values
+    // Get initial ADC value (update state first)
+    updateAFMState();
     current_afm_state.approach_initial_adc = current_afm_state.adc_0_avg;
     current_afm_state.approach_initial_position = current_afm_state.motors[motor - 1].current_position;
 
-    // Set approach parameters
-    current_afm_state.approach_motor = motor;
-    current_afm_state.approach_step_size = abs(step_size);
-    current_afm_state.approach_direction = max_steps > 0 ? 1 : 0; // Direction based on max_steps
-    current_afm_state.approach_threshold = threshold;
-    current_afm_state.approach_max_steps = abs(max_steps); // Store absolute value
-    current_afm_state.approach_speed = speed;
-    current_afm_state.approach_running = true;
-    current_afm_state.approach_last_update = millis();
-    current_afm_state.current_state = SystemState::APPROACHING;
+    // Set initial Z position to retracted state
+    dac_z.write(DAC_Z_RETRACT_TARGET);
+    current_afm_state.dac_z_val = DAC_Z_RETRACT_TARGET;
 
-    // Start motor movement with max steps
-    if (!startMotorMovement(
-            current_afm_state.approach_motor,
-            current_afm_state.approach_max_steps,
-            current_afm_state.approach_direction,
-            current_afm_state.approach_speed))
-    {
-        current_afm_state.approach_running = false;
-        current_afm_state.current_state = SystemState::IDLE;
-        return false;
+    // Log initial data point
+    if (current_afm_state.approach_data_count < MAX_APPROACH_POINTS) {
+        current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
+            current_afm_state.approach_total_steps_taken,
+            current_afm_state.approach_initial_adc,
+            current_afm_state.approach_initial_position
+        };
     }
+    
+    // --- Removed blocking loop --- 
+    // bool threshold_met = false;
+    // while (current_afm_state.approach_running) { ... loop content removed ... }
+    // --- Removed Cleanup --- 
+    // current_afm_state.approach_running = false; 
+    // current_afm_state.current_state = SystemState::IDLE;
+    // return threshold_met;
 
-    // Store initial data point
-    current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
-        0,
-        current_afm_state.approach_initial_adc,
-        current_afm_state.motors[current_afm_state.approach_motor - 1].current_position};
-    current_afm_state.approach_last_stored_step = 0;
-
-    return true;
+    return true; // Indicate successful initialization
 }
 
 void stopApproach()
 {
     if (current_afm_state.approach_running)
     {
-        stopMotor();
+        stopMotor(); // Stop motor if it was moving
         current_afm_state.approach_running = false;
-        current_afm_state.current_state = SystemState::IDLE;
+
+        // Only change system state if it was APPROACHING
+        if (current_afm_state.current_state == SystemState::APPROACHING) {
+             current_afm_state.current_state = SystemState::IDLE;
+        }
     }
 }
 
+// updateApproach performs one blocking step cycle including Z-probe/retract
 void updateApproach()
 {
     if (!current_afm_state.approach_running)
-        return;
+        return; // Not active, do nothing
 
-    unsigned long current_time = millis();
-    if (current_time - current_afm_state.approach_last_update < current_afm_state.approach_polling_interval)
+    // --- Preliminary Checks --- 
+    if (current_afm_state.approach_total_steps_taken >= current_afm_state.approach_max_steps)
     {
+        stopApproach(); // Max steps reached
         return;
     }
-
-    // Check threshold continuously using average ADC value
+    // Check initial threshold before moving (in case already engaged)
+    updateAFMState(); // Get latest ADC
     if (abs(current_afm_state.adc_0_avg - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold)
     {
-        stopApproach();
+        stopApproach(); // Already past threshold
         return;
     }
 
-    // Store data when we've moved at least step_size since last storage
-    int32_t current_steps = abs(current_afm_state.motors[current_afm_state.approach_motor - 1].current_position -
-                                current_afm_state.approach_initial_position);
-    if (current_steps - current_afm_state.approach_last_stored_step >= current_afm_state.approach_step_size)
+    // --- Perform Blocking Motor Step --- 
+    bool motor_success = moveMotorBlocking(
+        current_afm_state.approach_motor,
+        current_afm_state.approach_step_size,
+        current_afm_state.approach_direction,
+        current_afm_state.approach_step_delay);
+    
+    if (!motor_success)
     {
+        stopApproach(); // Failed to move motor
+        return;
+    }
+
+    // --- Blocking Settle Delay --- 
+    delay(current_afm_state.approach_polling_interval);
+
+    // --- Blocking Z-Probe Cycle --- 
+    bool threshold_met_during_probe = false;
+    uint16_t start_z = DAC_Z_RETRACT_TARGET;
+    uint16_t target_z = DAC_Z_PROBE_TARGET;
+    int32_t delta_z = (int32_t)target_z - (int32_t)start_z;
+    int total_steps = Z_CYCLE_STEPS;
+    if (total_steps <= 0) total_steps = 1;
+    uint64_t next_step_time_us = esp_timer_get_time();
+
+    for (int i = 1; i <= total_steps; ++i)
+    {
+        // Wait for step delay using microseconds
+        delayMicroseconds(Z_STEP_DELAY_US);
+
+        // Calculate next Z
+        int64_t intermediate_z = (int64_t)start_z + ((int64_t)delta_z * i) / total_steps;
+        if (intermediate_z < 0) intermediate_z = 0;
+        if (intermediate_z > 65535) intermediate_z = 65535;
+        uint16_t next_z = (uint16_t)intermediate_z;
+
+        // Write Z DAC
+        dac_z.write(next_z);
+        current_afm_state.dac_z_val = next_z;
+
+        // Update ADC State & Check Threshold
+        updateAFMState(); 
+        if (abs(current_afm_state.adc_0_avg - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold)
+        {
+            threshold_met_during_probe = true;
+            break; // Exit Z-probe loop
+        }
+    }
+    // Ensure final target is reached if loop completed normally
+    if (!threshold_met_during_probe && current_afm_state.dac_z_val != target_z) {
+         dac_z.write(target_z);
+         current_afm_state.dac_z_val = target_z;
+         updateAFMState(); // Update state one last time at the probe target
+         // Check threshold one last time at the very end of probe travel
+         if (abs(current_afm_state.adc_0_avg - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold)
+         {
+            threshold_met_during_probe = true;
+         }
+    }
+
+    // --- Handle Probe Result --- 
+    if (threshold_met_during_probe)
+    {   
+        // Log final data point where threshold was met
         if (current_afm_state.approach_data_count < MAX_APPROACH_POINTS)
         {
             current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
-                current_steps,
-                current_afm_state.adc_0_avg, // Store average ADC
-                current_afm_state.motors[current_afm_state.approach_motor - 1].current_position};
-            current_afm_state.approach_last_stored_step = current_steps;
+                current_afm_state.approach_total_steps_taken + current_afm_state.approach_step_size, // Log steps *including* this one
+                current_afm_state.adc_0_avg, 
+                current_afm_state.motors[current_afm_state.approach_motor - 1].current_position
+            };
+        }
+        stopApproach(); // Threshold met
+        return;
+    }
+    else
+    {
+        // --- Blocking Z-Retract Cycle --- 
+        start_z = DAC_Z_PROBE_TARGET; // Start from probe position
+        target_z = DAC_Z_RETRACT_TARGET;
+        delta_z = (int32_t)target_z - (int32_t)start_z;
+        // Use same duration/delay for retract
+        next_step_time_us = esp_timer_get_time();
+
+        for (int i = 1; i <= total_steps; ++i) // Use the same total_steps
+        {
+             delayMicroseconds(Z_STEP_DELAY_US);
+
+            int64_t intermediate_z = (int64_t)start_z + ((int64_t)delta_z * i) / total_steps;
+            if (intermediate_z < 0) intermediate_z = 0;
+            if (intermediate_z > 65535) intermediate_z = 65535;
+            uint16_t next_z = (uint16_t)intermediate_z;
+
+            dac_z.write(next_z);
+            current_afm_state.dac_z_val = next_z;
+        }
+         // Ensure final retract target is reached
+        if (current_afm_state.dac_z_val != target_z) {
+             dac_z.write(target_z);
+             current_afm_state.dac_z_val = target_z;
+        }
+
+        // --- Log Data & Increment Step Count (after successful Z cycle) --- 
+        current_afm_state.approach_total_steps_taken += current_afm_state.approach_step_size;
+        if (current_afm_state.approach_data_count < MAX_APPROACH_POINTS)
+        {
+            // Log the ADC value measured at the *probe target* before retracting
+            current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
+                current_afm_state.approach_total_steps_taken,
+                current_afm_state.adc_0_avg, // This holds the value from the end of the probe
+                current_afm_state.motors[current_afm_state.approach_motor - 1].current_position
+            };
         }
         else
         {
-            // Buffer full, stop approach
-            stopApproach();
+            stopApproach(); // Buffer full
+            return;
+        }
+
+        // --- Final Check after Step Cycle --- 
+        if (current_afm_state.approach_total_steps_taken >= current_afm_state.approach_max_steps)
+        {
+            stopApproach(); // Max steps reached
             return;
         }
     }
-
-    current_afm_state.approach_last_update = current_time;
 }
 
 // ============================================================================
@@ -748,6 +878,23 @@ void updateDacRamp() {
         return;
     }
 
+    // Check if this ramp is for Z (handled by updateZramp in approach)
+    // Add a simple check: if delta_z is non-zero, it's likely a Z ramp.
+    // A more robust method might involve a dedicated flag.
+    if (current_afm_state.ramp_delta_z != 0) {
+         // This assumes ramps are either XY or Z, not XYZ.
+         // If Z is ramping, let updateZramp handle it during approach.
+        if (current_afm_state.current_state == SystemState::APPROACHING) {
+             return;
+        }
+        // If not approaching, but Z ramp is active (e.g., manual Z move command needed)
+        // then call updateZramp or integrate Z logic here. For now, we assume
+        // non-approach ramps are XY only.
+        // If non-approach Z ramps are needed, integrate updateZramp logic here.
+    }
+
+
+    // Proceed with XY ramp logic (only if ramp_delta_z is zero or not approaching)
     uint64_t current_time_us = esp_timer_get_time();
 
     if (current_time_us >= current_afm_state.ramp_next_step_time_us) {
@@ -764,17 +911,23 @@ void updateDacRamp() {
             current_afm_state.ramp_active = false; // Mark ramp as complete
         } else {
             // Calculate intermediate values using integer math
-             next_x = current_afm_state.ramp_start_x + (current_afm_state.ramp_delta_x * current_afm_state.ramp_current_step) / current_afm_state.ramp_total_steps;
-             next_y = current_afm_state.ramp_start_y + (current_afm_state.ramp_delta_y * current_afm_state.ramp_current_step) / current_afm_state.ramp_total_steps;
+             next_x = current_afm_state.ramp_start_x + ((int64_t)current_afm_state.ramp_delta_x * current_afm_state.ramp_current_step) / current_afm_state.ramp_total_steps;
+             next_y = current_afm_state.ramp_start_y + ((int64_t)current_afm_state.ramp_delta_y * current_afm_state.ramp_current_step) / current_afm_state.ramp_total_steps;
         }
 
-        // Write values
-        dac_x.write(next_x);
-        dac_y.write(next_y);
+        // Write values if changed
+        bool xy_changed = false;
+        if (next_x != current_afm_state.dac_x_val) {
+            dac_x.write(next_x);
+            current_afm_state.dac_x_val = next_x;
+            xy_changed = true;
+        }
+         if (next_y != current_afm_state.dac_y_val) {
+            dac_y.write(next_y);
+            current_afm_state.dac_y_val = next_y;
+            xy_changed = true;
+        }
 
-        // Update state immediately
-        current_afm_state.dac_x_val = next_x;
-        current_afm_state.dac_y_val = next_y;
 
         // If ramp is still active, schedule next step
         if (current_afm_state.ramp_active) {
@@ -1363,17 +1516,17 @@ String processCommand(const String &json_command)
         }
         else
         {
-            unsigned int speed = doc["speed"] | 500;
-            speed = constrain(speed, 100, 5000);
+            unsigned int delay_val = doc["delay"] | 500; // Use "delay" instead of "speed"
+            delay_val = constrain(delay_val, 100, 5000); // Apply constraints
 
             if (startMotorMovement(motor_param.as<int>(), steps_param.as<int>(),
-                                   direction_param.as<int>(), speed))
+                                   direction_param.as<int>(), delay_val)) // Pass delay_val
             {
                 response["status"] = "started";
                 response["motor"] = motor_param.as<int>();
                 response["steps"] = steps_param.as<int>();
                 response["direction"] = direction_param.as<int>() ? "CW" : "CCW";
-                response["speed"] = speed;
+                response["delay"] = delay_val; // Report "delay"
                 response["target_position"] = current_afm_state.motors[motor_param.as<int>() - 1].target_position;
             }
             else
@@ -1480,12 +1633,13 @@ String processCommand(const String &json_command)
             const auto &step_size_param = doc["step_size"];
             const auto &threshold_param = doc["threshold"];
             const auto &max_steps_param = doc["max_steps"];
-            const auto &speed_param = doc["speed"];
+            const auto &delay_param = doc["delay"]; // Use "delay" instead of "speed"
 
-            if (!motor_param.is<int>() || !step_size_param.is<int>() || !threshold_param.is<int>())
+            // Basic Parameter Validation
+            if (!motor_param.is<int>() || !step_size_param.is<int>() || !threshold_param.is<int>() || !max_steps_param.is<int>()) // Max steps is mandatory
             {
                 response["status"] = "error";
-                response["message"] = "Missing required parameters (motor, step_size, threshold)";
+                response["message"] = "Missing required parameters (motor, step_size, threshold, max_steps)";
             }
             else if (motor_param.as<int>() < 1 || motor_param.as<int>() > 3)
             {
@@ -1502,32 +1656,47 @@ String processCommand(const String &json_command)
                 response["status"] = "error";
                 response["message"] = "Threshold must be positive";
             }
-            else
+            else if (max_steps_param.as<int>() == 0)
             {
-                unsigned int speed = speed_param.is<int>() ? speed_param.as<int>() : 500;
-                speed = constrain(speed, 100, 5000); // Limit speed between 100 and 5000 microseconds
+                response["status"] = "error";
+                response["message"] = "max_steps cannot be zero";
+            }
+            else // Basic params valid, process optional and start
+            {
+                // Process parameters with defaults
+                unsigned int delay_val = delay_param.is<int>() ? constrain(delay_param.as<int>(), 100, 5000) : current_afm_state.approach_step_delay;
 
+                // Call the non-blocking startApproach function
                 if (startApproach(motor_param.as<int>(), step_size_param.as<int>(),
-                                  threshold_param.as<int>(), max_steps_param.as<int>(), speed))
+                                  threshold_param.as<int>(), max_steps_param.as<int>(), delay_val))
                 {
+                    // Respond immediately that approach sequence has been initiated
                     response["status"] = "started";
+                    response["message"] = "Approach initiated.";
+                    // Include parameters in response
                     response["motor"] = motor_param.as<int>();
                     response["step_size"] = step_size_param.as<int>();
                     response["threshold"] = threshold_param.as<int>();
-                    response["speed"] = speed;
+                    response["delay"] = delay_val;
                     response["max_steps"] = max_steps_param.as<int>();
                 }
                 else
                 {
+                    // Failed initialization
                     response["status"] = "error";
-                    response["message"] = "Failed to start approach";
+                    response["message"] = "Failed to start approach (check state or parameters)";
                 }
             }
         }
         else if (doc["action"] == "stop")
         {
-            stopApproach();
-            response["status"] = "stopped";
+            // Signal the background process (updateApproach) to stop
+            stopApproach(); // Calls the flag-setting function
+            response["status"] = "stopping"; // Indicate stop was requested
+            // Optional: Add check if it was already stopped
+            // if (!current_afm_state.approach_running && current_afm_state.current_state != SystemState::APPROACHING) { 
+            //     response["message"] = "Approach not running.";
+            // }
         }
         else if (doc["action"] == "get_data")
         {
@@ -1697,7 +1866,8 @@ TaskHandle_t control_task_handle;
 void controlTask(void *parameter)
 {
     // Subscribe this task to the Task Watchdog Timer
-    esp_task_wdt_delete(NULL);
+    // esp_task_wdt_init(WDT_TIMEOUT_S, true); // Enable panic WDT
+    esp_task_wdt_add(NULL); // Add current task to WDT watch
 
     // Variable to store the start time of the previous iteration
     static uint64_t lastStartTime = 0;
@@ -1705,7 +1875,6 @@ void controlTask(void *parameter)
     {
         // Wait for the next cycle.
 
-        int count = 0;
         // --- Measure Period and Frequency ---
         uint64_t currentStartTime = esp_timer_get_time();
         uint32_t period_us = 0;
@@ -1731,20 +1900,25 @@ void controlTask(void *parameter)
 
         // Perform control actions (Execution time of these does not affect frequency measurement)
         updateMotorMovement();
-        updateDacRamp(); // Add update for DAC ramping
+        updateDacRamp(); // Handles XY ramps (and potentially non-approach Z)
+        // Z ramp during approach is handled within updateApproach calling updateZramp
         updatePIDControl();
-        updateApproach();
+        updateApproach(); // Handles approach state machine, including calling updateZramp
         updateScan();
-        updateAFMState();
+        updateAFMState(); // Reads ADCs, updates averages
 
-        if (++count == 1000) {
-            // Occasionally yield or reset WDT
-            count = 0;
-            portYIELD(); // Or just yield CPU briefly
-        }
 
         // Reset the WDT after completing the work for this cycle
         esp_task_wdt_reset();
+
+        // Small delay/yield to prevent WDT issues on very fast loops and allow lower priority tasks
+        // Adjust delay based on measured loop frequency if needed
+        // If loop frequency is > 10kHz, a small delay might be beneficial
+         if (current_afm_state.control_loop_last_period_us < 100) { // e.g., faster than 10kHz
+            vTaskDelay(pdMS_TO_TICKS(1)); // Yield for 1ms
+         } else {
+             taskYIELD(); // Yield briefly if loop is slower
+         }
     }
 }
 

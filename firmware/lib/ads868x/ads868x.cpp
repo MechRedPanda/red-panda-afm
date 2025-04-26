@@ -9,14 +9,22 @@
 ADC_ads868x::ADC_ads868x(SPIClass *spi, uint8_t buffer_size, u_int8_t cs_pin, uint16_t range_sel): 
   _cs_pin(cs_pin), 
   spi(spi),
-  _range_sel(range_sel)
+  _range_sel(range_sel),
+  _buffer_size(buffer_size)
 {
-  uint32_t receive_buffer[buffer_size];
-  _receive_buffer = receive_buffer;
+  // Dynamically allocate the buffer
+  _receive_buffer = new uint32_t[buffer_size];
   _buffer_store_num = 0;
-  _buffer_size = buffer_size;
+  // _buffer_size = buffer_size; // Already set in initializer list
 
   pinMode(_cs_pin, OUTPUT);
+  // It's often better to initialize CS high
+  digitalWrite(_cs_pin, HIGH);
+}
+
+// Destructor to free allocated memory
+ADC_ads868x::~ADC_ads868x() {
+  delete[] _receive_buffer;
 }
 
 
@@ -88,5 +96,9 @@ uint16_t ADC_ads868x::readADC(void){
 }
 
 void ADC_ads868x::reset(void){
+  // Restore desired range setting
   transmit(ADS8689_WRITE_FULL, ADS8689_RANGE_SEL_REG, _range_sel);
+
+  // Wait for configuration settling (verify delay from datasheet!)
+  delayMicroseconds(100); // Placeholder settling delay (100us)
 }

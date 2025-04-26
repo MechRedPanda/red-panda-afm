@@ -138,8 +138,8 @@ class ApproachWidget(QMainWindow, Ui_ApproachWidget):
         self.motor_number.setValue(1)  # Default to motor 1
         self.step_size.setText("100")
         self.max_steps.setText("500000")  # Positive for forward direction
-        self.threshold.setText("10")
-        self.step_delay_input.setText("250")  # Set default step delay (speed)
+        self.threshold.setText("100")
+        self.step_delay_input.setText("100")  # Set default step delay (speed)
 
         # Set up input validation for step delay
         step_delay_validator = QIntValidator()

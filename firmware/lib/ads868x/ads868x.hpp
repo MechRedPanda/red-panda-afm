@@ -39,6 +39,7 @@ class ADC_ads868x
     uint16_t readADC(void);
     void clearBuffer(void);
     void reset(void);
+    ~ADC_ads868x();
   private:
     SPIClass *spi;
     SPISettings _spi_settings = SPISettings(16000000, MSBFIRST, SPI_MODE0);
