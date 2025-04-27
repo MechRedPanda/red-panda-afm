@@ -19,7 +19,7 @@ public:
 
 private:
   SPIClass *spi;
-  SPISettings _spi_settings = SPISettings(16000000, MSBFIRST, SPI_MODE0);
+  SPISettings _spi_settings = SPISettings(10000000, MSBFIRST, SPI_MODE0);
   uint8_t _cs_pin;
   uint16_t _range_sel;
 };

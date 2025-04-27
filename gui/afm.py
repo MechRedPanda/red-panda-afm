@@ -10,9 +10,9 @@ from typing import Dict, Optional, Union, List, Tuple, Any
 from dataclasses import dataclass, field
 import numpy as np
 import queue # Added for response queue
-import csv
-import struct # Needed for unpacking binary data
-import tifffile # For saving TIFF images
+import gwyfile # For saving GWY files
+from gwyfile.objects import GwyContainer, GwyDataField
+import tifffile
 
 # Default serial port settings
 DEFAULT_PORT = None  # Will auto-detect if None
@@ -229,7 +229,6 @@ class AFM:
     def _serial_read_loop(self):
         """Background thread to continuously read serial data (JSON, CSV, Text)."""
         print("Serial reader thread started (CSV Scan Data Mode).")
-        # Removed binary format definitions
         read_buffer = b''
 
         while not self._stop_read_thread.is_set():
@@ -276,17 +275,22 @@ class AFM:
                             try:
                                 parts = line_str.split(',')
                                 if len(parts) == 5:
-                                    # Convert to integers
-                                    point_data = [int(p) for p in parts]
-                                    x, y, adc0, dacz, flags = point_data
+                                    # Convert to integers/float
+                                    x = int(parts[0])
+                                    y = int(parts[1])
+                                    adc_0 = int(parts[2])
+                                    dac_z = int(parts[3])
+                                    is_trace = bool(int(parts[4]))
                                     
-                                    # Store data
+                                    # Store data point
+                                    point_data = [x, y, adc_0, dac_z, is_trace]
                                     self.scan_data.append(point_data)
-                                    is_retrace = (flags == 2) # Check retrace flag
-                                    if is_retrace:
-                                        self.scan_data_retrace.append(point_data)
-                                    else:
+                                    
+                                    # Store in appropriate trace/retrace collection
+                                    if is_trace:
                                         self.scan_data_trace.append(point_data)
+                                    else:
+                                        self.scan_data_retrace.append(point_data)
                                     continue # Handled as CSV scan data
                                 else:
                                      # Malformed CSV, fall through to other checks
@@ -332,7 +336,7 @@ class AFM:
 
                 # --- No newline found in buffer --- 
                 else:
-                    # Need more data to complete a line or potential binary block (which we now ignore)
+                    # Need more data to complete a line
                     break # Break inner loop to read more data
 
             # Update buffer by removing processed bytes
@@ -452,7 +456,7 @@ class AFM:
                 self.status_queue.append(status) # Keep history in status_queue
                 self.current_state = status.state # Update AFM's internal state
 
-                print(f"Status: {status.loop_avg_freq_hz:.2f} Hz") # Updated print
+                print(f"Status: {status.loop_last_freq_hz/1000:.2f} kHz") # Updated print
                 return status
 
             except Exception as e:
@@ -939,7 +943,7 @@ class AFM:
                            kd: Optional[float] = None, invert: Optional[bool] = None,
                            target: Optional[int] = None, slew_rate: Optional[float] = None,
                            integral_min: Optional[float] = None, integral_max: Optional[float] = None,
-                           bias: Optional[float] = None) -> bool:
+                           bias: Optional[float] = None, alpha: Optional[float] = None) -> bool:
         """Set PID control parameters.
 
         Args:
@@ -952,6 +956,7 @@ class AFM:
             integral_min (Optional[float]): Minimum value for the integral term.
             integral_max (Optional[float]): Maximum value for the integral term.
             bias (Optional[float]): Bias added to the PID output.
+            alpha (Optional[float]): Filter coefficient for derivative term (0 < alpha < 1).
 
         Returns:
             bool: True if successful, False otherwise
@@ -976,6 +981,7 @@ class AFM:
             if integral_min is not None: command["integral_min"] = integral_min
             if integral_max is not None: command["integral_max"] = integral_max
             if bias is not None: command["bias"] = bias
+            if alpha is not None: command["alpha"] = alpha
 
             # Send command
             response = self.send_and_receive(command)
@@ -1060,7 +1066,7 @@ class AFM:
 
     # Scan Methods
     def start_scan(self, x_start: int, x_end: int, y_start: int, y_end: int,
-                     resolution: int, dwell_time: int) -> bool:
+                     resolution: int, line_frequency_hz: float) -> bool:
         """Start a scan procedure on the ESP32 (push model).
 
         Args:
@@ -1069,7 +1075,7 @@ class AFM:
             y_start (int): Starting DAC value for Y-axis.
             y_end (int): Ending DAC value for Y-axis.
             resolution (int): Number of points per axis (e.g., 256 for 256x256).
-            dwell_time (int): Time in milliseconds to wait at each point.
+            line_frequency_hz (float): Line scan frequency in Hz.
 
         Returns:
             bool: True if scan started successfully, False otherwise.
@@ -1082,8 +1088,11 @@ class AFM:
             return False
 
         # Basic validation (same as before)
-        if not all(isinstance(v, int) for v in (x_start, x_end, y_start, y_end, resolution, dwell_time)):
-            print("Scan range, resolution, and dwell time must be integers.")
+        if not all(isinstance(v, int) for v in (x_start, x_end, y_start, y_end, resolution)):
+            print("Scan range and resolution must be integers.")
+            return False
+        if not isinstance(line_frequency_hz, (int, float)):
+            print("Line frequency must be a number.")
             return False
         if x_start < 0 or x_start > 65535 or x_end < 0 or x_end > 65535 or \
            y_start < 0 or y_start > 65535 or y_end < 0 or y_end > 65535:
@@ -1095,8 +1104,8 @@ class AFM:
         if resolution < 2:
             print("Resolution must be at least 2.")
             return False
-        if dwell_time < 0:
-            print("Dwell time must be non-negative.")
+        if line_frequency_hz <= 0:
+            print("Line frequency must be positive.")
             return False
 
         # Acquire busy lock
@@ -1129,10 +1138,11 @@ class AFM:
                 "y_start": y_start,
                 "y_end": y_end,
                 "resolution": resolution,
-                "dwell_time": dwell_time,
+                "line_frequency_hz": line_frequency_hz,
             }
 
             # Send command and wait for confirmation
+            print(f"Sending scan start command: {command}")
             response = self.send_and_receive(command, timeout=5.0) # Allow more time for scan setup
             
             if response and response.get("status") == "started":
@@ -1221,13 +1231,12 @@ class AFM:
         # which is updated by start/stop calls and the background reader/status updates.
         return self.scan_running
 
-    def get_scan_image(self, channel_index=0, scan_type="trace", save_raw=False):
+    def get_scan_image(self, channel_index=0, scan_type="trace"):
         """Get scan image data for a specific channel and scan type.
         
         Args:
-            channel_index (int): Index of the channel to get image for (0-3)
+            channel_index (int): Index of the channel to get image for (0 for ADC0, 1 for DACZ)
             scan_type (str): "trace" or "retrace"
-            save_raw (bool): If True, save raw data to CSV files
             
         Returns:
             numpy.ndarray: 2D array of image data
@@ -1250,69 +1259,31 @@ class AFM:
         # Convert to numpy array for easier processing
         data = np.array(data)
         
-        # Extract coordinates and channel data
-        x_coords = data[:, 0]
-        y_coords = data[:, 1]
-        channel_data = data[:, channel_index + 2]  # +2 to skip x,y coordinates
+        # Select channel data based on channel_index
+        # 0 = ADC0 (index 2), 1 = DACZ (index 3)
+        channel_map = {0: 2, 1: 3}
+        if channel_index not in channel_map:
+            print(f"Invalid channel index: {channel_index}. Must be 0 (ADC0) or 1 (DACZ).")
+            return None
+            
+        channel_idx = channel_map[channel_index]
+        
+        # Extract indices and channel data
+        x_indices = data[:, 0]  # x_index is at index 0
+        y_indices = data[:, 1]  # y_index is at index 1
+        channel_values = data[:, channel_idx]  # Selected channel value
         
         # Get scan parameters
-        x_start = self.scan_x_start
-        x_end = self.scan_x_end
-        y_start = self.scan_y_start
-        y_end = self.scan_y_end
         resolution = self.scan_resolution
-        
-        # Calculate pixel coordinates using rounding
-        x_pixels = np.round((x_coords - x_start) / (x_end - x_start) * (resolution - 1)).astype(int)
-        y_pixels = np.round((y_coords - y_start) / (y_end - y_start) * (resolution - 1)).astype(int)
         
         # Create image array
         image = np.full((resolution, resolution), np.nan)
         
-        # Track duplicate points
-        duplicate_points = {}
-        valid_points = 0
-        
-        # Fill image with data
+        # Fill image with data using indices directly
         for i in range(len(data)):
-            x, y = x_pixels[i], y_pixels[i]
+            x, y = int(x_indices[i]), int(y_indices[i])
             if 0 <= x < resolution and 0 <= y < resolution:
-                key = (x, y)
-                if key in duplicate_points:
-                    duplicate_points[key].append((x_coords[i], y_coords[i], channel_data[i]))
-                else:
-                    duplicate_points[key] = [(x_coords[i], y_coords[i], channel_data[i])]
-                image[y, x] = channel_data[i]
-                valid_points += 1
-        
-        # Print detailed debugging information
-        print(f"\nProcessing {len(data)} data points for {scan_type} image")
-        print(f"X range in data: {x_coords.min()} to {x_coords.max()}, Y range: {y_coords.min()} to {y_coords.max()}")
-        print(f"Image pixels - Valid: {valid_points}/{len(data)} ({valid_points/len(data)*100:.1f}%)")
-        print(f"Pixel mapping - Unique pixels: {len(duplicate_points)}, Duplicate mappings: {sum(len(v) > 1 for v in duplicate_points.values())}")
-        print(f"Max points per pixel: {max(len(v) for v in duplicate_points.values())}")
-        
-        # Print distribution of points per pixel
-        point_dist = {}
-        for points in duplicate_points.values():
-            count = len(points)
-            point_dist[count] = point_dist.get(count, 0) + 1
-        print(f"Points per pixel distribution: {point_dist}")
-        
-        # Print details of duplicate points
-        print("\nDuplicate points details:")
-        for pixel, points in duplicate_points.items():
-            if len(points) > 1:
-                print(f"\nPixel ({pixel[0]}, {pixel[1]}) has {len(points)} points:")
-                for i, (x, y, value) in enumerate(points):
-                    print(f"  Point {i+1}: X={x}, Y={y}, Value={value}")
-        
-        # Find missing pixels
-        missing_pixels = []
-        for y in range(resolution):
-            for x in range(resolution):
-                if np.isnan(image[y, x]):
-                    missing_pixels.append((x, y))
+                image[y, x] = channel_values[i]
         
         return image
 
@@ -1359,190 +1330,37 @@ class AFM:
             "scan_state": self.current_state.name
         }
 
-    def export_csv(self, filename: str, scan_type: str = "trace", channel: str = "adc0", 
-                  delimiter: str = ',') -> bool:
-        """Export scan data as a CSV file that can be imported into Gwyddion.
+    def export_tiff(self, filename, channels=None):
+        """
+        Export scan data as TIFF files, one file per channel and scan type.
         
         Args:
-            filename (str): Output file path (should end with .csv or .txt)
-            scan_type (str): "trace" or "retrace"
-            channel (str): "adc0" or "dacz" to specify which channel to export
-            delimiter (str): Field delimiter, default is comma
-            
-        Returns:
-            bool: True if export was successful, False otherwise
+            filename (str): Base path for the TIFF files (will append channel name and scan type)
+            channels (list): List of channel indices to export (0 for ADC0, 1 for DACZ)
         """
-        if not self.scan_data:
-            print("No scan data available")
-            return False
-            
-        # Get data for the specified scan type
-        if scan_type == "trace":
-            data = list(self.scan_data_trace)
-        elif scan_type == "retrace":
-            data = list(self.scan_data_retrace)
-        else:
-            print(f"Invalid scan type: {scan_type}")
-            return False
-            
-        if not data:
-            print(f"No {scan_type} data available")
-            return False
-            
-        # Convert to numpy array for easier processing
-        data = np.array(data)
+        if not self.scan_data_trace or not self.scan_data_retrace:
+            raise ValueError("No scan data available")
         
-        # Extract coordinates and channel data
-        x_coords = data[:, 0]
-        y_coords = data[:, 1]
+        # Default to both channels if none specified
+        if channels is None:
+            channels = [0, 1]
         
-        # Select channel data based on parameter
-        if channel.lower() == "adc0":
-            channel_data = data[:, 2]  # ADC0 is at index 2
-        elif channel.lower() == "dacz":
-            channel_data = data[:, 3]  # DACZ is at index 3
-        else:
-            print(f"Invalid channel: {channel}")
-            return False
-        
-        # Get scan parameters
-        x_start = self.scan_x_start
-        x_end = self.scan_x_end
-        y_start = self.scan_y_start
-        y_end = self.scan_y_end
-        resolution = self.scan_resolution
-        
-        # Calculate pixel coordinates using rounding
-        x_pixels = np.round((x_coords - x_start) / (x_end - x_start) * (resolution - 1)).astype(int)
-        y_pixels = np.round((y_coords - y_start) / (y_end - y_start) * (resolution - 1)).astype(int)
-        
-        # Create image array
-        image = np.full((resolution, resolution), np.nan)
-        
-        # Fill image with data
-        for i in range(len(data)):
-            x, y = x_pixels[i], y_pixels[i]
-            if 0 <= x < resolution and 0 <= y < resolution:
-                image[y, x] = channel_data[i]
-        
-        try:
-            # Replace NaN with 0 for CSV export
-            image = np.nan_to_num(image, nan=0.0)
-            
-            # Save as CSV (Transposed)
-            np.savetxt(filename, image.T, delimiter=delimiter, fmt='%.6f')
-            
-            print(f"[✔] Exported {filename} ({resolution}x{resolution}) as CSV for Gwyddion.")
-            print(f"  - Scan type: {scan_type}")
-            print(f"  - Channel: {channel}")
-            print(f"  - Data shape: {image.shape}")
-            return True
-            
-        except Exception as e:
-            print(f"Error exporting CSV file: {e}")
-            return False
-
-    def export_tiff(self, filename: str, scan_type: str = "trace", channel: str = "adc0") -> bool:
-        """Export scan data as a TIFF image file.
-        
-        Args:
-            filename (str): Output file path (should end with .tiff or .tif)
-            scan_type (str): "trace" or "retrace"
-            channel (str): "adc0" or "dacz" to specify which channel to export
-            
-        Returns:
-            bool: True if export was successful, False otherwise
-        """
-        if not self.scan_data:
-            print("No scan data available")
-            return False
-            
-        # Get data for the specified scan type
-        if scan_type == "trace":
-            data = list(self.scan_data_trace)
-        elif scan_type == "retrace":
-            data = list(self.scan_data_retrace)
-        else:
-            print(f"Invalid scan type: {scan_type}")
-            return False
-            
-        if not data:
-            print(f"No {scan_type} data available")
-            return False
-            
-        # Convert to numpy array for easier processing
-        data = np.array(data)
-        
-        # Extract coordinates and channel data
-        x_coords = data[:, 0]
-        y_coords = data[:, 1]
-        
-        # Select channel data based on parameter
-        if channel.lower() == "adc0":
-            channel_data = data[:, 2]  # ADC0 is at index 2
-        elif channel.lower() == "dacz":
-            channel_data = data[:, 3]  # DACZ is at index 3
-        else:
-            print(f"Invalid channel: {channel}")
-            return False
-        
-        # Get scan parameters
-        x_start = self.scan_x_start
-        x_end = self.scan_x_end
-        y_start = self.scan_y_start
-        y_end = self.scan_y_end
-        resolution = self.scan_resolution
-        
-        if resolution == 0:
-            print("Scan resolution is 0, cannot create image.")
-            return False
-        
-        # Calculate pixel coordinates using rounding
-        # Avoid division by zero if start == end (shouldn't happen with validation)
-        x_range = x_end - x_start
-        y_range = y_end - y_start
-        if x_range == 0 or y_range == 0:
-             print(f"Invalid scan range for image creation: X={x_range}, Y={y_range}")
-             return False
-
-        x_pixels = np.round((x_coords - x_start) / x_range * (resolution - 1)).astype(int)
-        y_pixels = np.round((y_coords - y_start) / y_range * (resolution - 1)).astype(int)
-        
-        # Create image array (Y, X order)
-        image = np.full((resolution, resolution), np.nan, dtype=np.float32)
-        
-        # Fill image with data
-        valid_points = 0
-        for i in range(len(data)):
-            x, y = x_pixels[i], y_pixels[i]
-            # Ensure indices are within bounds
-            if 0 <= y < resolution and 0 <= x < resolution:
-                image[y, x] = channel_data[i]
-                valid_points += 1
-            # else: # Optional: log points outside bounds
-            #     print(f"Warning: Point index ({x}, {y}) outside image bounds ({resolution}x{resolution}).")
-
-        if valid_points == 0:
-             print("No valid points found within image bounds.")
-             # Decide if saving an empty/NaN image is desired or return False
-             # return False 
-
-        try:
-            # Save as TIFF (preserving NaN values, using float32)
-            # Note: We do NOT transpose here like for Gwyddion CSV.
-            # Standard TIFF is often (rows=Y, columns=X)
-            tifffile.imwrite(filename, image.T, imagej=True) # Use imagej=True for better compatibility
-            
-            print(f"[✔] Exported {filename} ({resolution}x{resolution}) as TIFF.")
-            print(f"  - Scan type: {scan_type}")
-            print(f"  - Channel: {channel}")
-            print(f"  - Data shape: {image.shape}")
-            print(f"  - Valid points mapped: {valid_points}/{len(data)}")
-            return True
-            
-        except Exception as e:
-            print(f"Error exporting TIFF file: {e}")
-            return False
+        # Process each channel and scan type
+        for channel_idx in channels:
+            for scan_type in ["trace", "retrace"]:
+                # Get the channel data
+                image = self.get_scan_image(channel_idx, scan_type)
+                if image is None:
+                    continue
+                    
+                # Create filename for this channel and scan type
+                channel_name = "ADC0" if channel_idx == 0 else "DACZ"
+                channel_filename = f"{filename}_{channel_name}_{scan_type}.tiff"
+                
+                # Save as TIFF
+                tifffile.imwrite(channel_filename, image)
+                
+        return True
 
     def get_scan_line(self, scan_type: str = "trace") -> Optional[np.ndarray]:
         """Get the last line of scan data with valid points for plotting.
@@ -1561,25 +1379,19 @@ class AFM:
         if resolution == 0:
             return None
             
-        # Get scan boundaries
-        x_start = self.scan_x_start
-        x_end = self.scan_x_end
-        y_start = self.scan_y_start
-        y_end = self.scan_y_end
-            
         # First, get trace data to determine the latest line
         trace_data = list(self.scan_data_trace)
         if not trace_data:
             return None
             
         trace_data = np.array(trace_data)
-        x_coords = trace_data[:, 0]  # X is at index 0
-        unique_x = np.unique(np.round(x_coords, decimals=3))
+        x_indices = trace_data[:, 0]  # x_index is at index 0
+        unique_x = np.unique(x_indices)
         
         if len(unique_x) == 0:
             return None
             
-        # Get the last X coordinate that has data
+        # Get the last X index that has data
         last_x = unique_x[-1]
         
         # Now get data for the requested scan type
@@ -1594,9 +1406,8 @@ class AFM:
             print(f"Invalid scan type: {scan_type}")
             return None
         
-        # Find points that belong to this line (within a small tolerance)
-        tolerance = (x_end - x_start) / (resolution * 2)  # Half the distance between lines
-        line_mask = np.abs(data[:, 0] - last_x) < tolerance
+        # Find points that belong to this line
+        line_mask = data[:, 0] == last_x
         
         # Extract points for this line
         line_points = data[line_mask]
@@ -1605,8 +1416,8 @@ class AFM:
         if len(line_points) == 0:
             return None
             
-        # Sort points by y coordinate to ensure correct order
-        line_points = line_points[line_points[:, 1].argsort()]  # Sort by Y (index 1)
+        # Sort points by y index to ensure correct order
+        line_points = line_points[line_points[:, 1].argsort()]  # Sort by Y index
         
         # Create a new array with NaN values for missing points
         num_columns = data.shape[1] if len(data.shape) > 1 else 4
@@ -1636,7 +1447,7 @@ if __name__ == "__main__":
         try:
             # Example: Start a scan
             print("Starting scan...")
-            if afm.start_scan(x_start=10000, x_end=55000, y_start=10000, y_end=55000, resolution=16, dwell_time=2):
+            if afm.start_scan(x_start=10000, x_end=55000, y_start=10000, y_end=55000, resolution=8, line_frequency_hz=10):
                 print("Scan initiated.")
                 # Monitor scan progress
                 while afm.is_scan_running():
@@ -1657,19 +1468,16 @@ if __name__ == "__main__":
 
             # Get the scan image
             print(len(afm.scan_data))
-            scan_image = afm.get_scan_image(channel_index=2, scan_type="trace")
+            scan_image = afm.get_scan_image(channel_index=1, scan_type="trace")
             print(f"Scan image shape: {scan_image.shape}")
 
-            # --- Example: Export scan data as CSV files ---
-            print("\nExporting scan data as CSV files...")
+            # --- Example: Export scan data as TIFF files ---
+            print("\nExporting scan data as TIFF files...")
             
-            # Export trace ADC0 data
-            if afm.export_csv("scan_trace_adc0.csv", scan_type="trace", channel="adc0"):
-                print("Successfully exported trace ADC0 data")
+            # Export trace data with all channels
+            if afm.export_tiff("data/test/scan", channels=[0, 1]):
+                print("Successfully exported trace data")
             
-            # Export retrace DACZ data
-            if afm.export_csv("scan_retrace_dacz.csv", scan_type="retrace", channel="dacz"):
-                print("Successfully exported retrace DACZ data")
 
         except KeyboardInterrupt:
             print("Stopping...")

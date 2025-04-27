@@ -28,17 +28,12 @@ uint16_t ADC_ads8681::readADC(void)
   uint8_t tx[4] = {0, 0, 0, 0};
   uint8_t rx[4];
 
+  // Read the result of the previous conversion
+  // Note: We don't wait for the new conversion to complete
+  // This gives us pipelined operation - conversion and reading overlap
   digitalWrite(_cs_pin, LOW);
   spi->beginTransaction(_spi_settings);
-  spi->transfer(tx, 4);  // First NOP to initiate conversion
-  spi->endTransaction();
-  digitalWrite(_cs_pin, HIGH);
-
-  delayMicroseconds(5); // wait for conversion to complete
-
-  digitalWrite(_cs_pin, LOW);
-  spi->beginTransaction(_spi_settings);
-  spi->transfer(rx, 4);  // Second NOP to get result
+  spi->transfer(rx, 4);  // Second NOP to get previous result
   spi->endTransaction();
   digitalWrite(_cs_pin, HIGH);
 

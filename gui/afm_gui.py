@@ -302,46 +302,42 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
         self.afm = afm
 
         # --- UI Setup ---
-        # Scan parameters defaults (already handled by setupUi if defaults set in Qt Designer)
+        # Scan parameters defaults
         self.x_start_input.setText("30000")
         self.x_end_input.setText("35000")
         self.y_start_input.setText("30000")
         self.y_end_input.setText("35000")
         self.scan_resolution_input.setText("128")
-        self.dwell_time_input.setText("2")
+        self.line_frequency_input.setText("1")  # Default to 1kHz line frequency
 
         # --- Initialize Plots and Images ---
-        # Titles and labels for the plots created by setupUi
+        # Titles and labels for the plots
         self.adc_0_plot_curve.setTitle("ADC0 Last Line", color="b", size="10pt")
         self.adc_0_plot_curve.setLabel('left', 'ADC0 Value')
         self.adc_0_plot_curve.setLabel('bottom', 'Pixel Index')
         self.adc_0_plot_curve.showGrid(x=True, y=True)
-        self.adc_0_line_plot = self.adc_0_plot_curve.plot(pen=pg.mkPen('b', width=2), name="Trace") # Create plot item
-        self.adc_0_retrace_plot = self.adc_0_plot_curve.plot(pen=pg.mkPen('r', width=2, style=Qt.PenStyle.DashLine), name="Retrace") # Add retrace plot
+        self.adc_0_line_plot = self.adc_0_plot_curve.plot(pen=pg.mkPen('b', width=2), name="Trace")
+        self.adc_0_retrace_plot = self.adc_0_plot_curve.plot(pen=pg.mkPen('r', width=2, style=Qt.PenStyle.DashLine), name="Retrace")
 
         self.dac_z_plot_curve.setTitle("DAC Z Last Line", color="g", size="10pt")
         self.dac_z_plot_curve.setLabel('left', 'DAC Z Value')
         self.dac_z_plot_curve.setLabel('bottom', 'Pixel Index')
         self.dac_z_plot_curve.showGrid(x=True, y=True)
-        self.dac_z_line_plot = self.dac_z_plot_curve.plot(pen=pg.mkPen('g', width=2), name="Trace") # Create plot item
-        self.dac_z_retrace_plot = self.dac_z_plot_curve.plot(pen=pg.mkPen('r', width=2, style=Qt.PenStyle.DashLine), name="Retrace") # Add retrace plot
+        self.dac_z_line_plot = self.dac_z_plot_curve.plot(pen=pg.mkPen('g', width=2), name="Trace")
+        self.dac_z_retrace_plot = self.dac_z_plot_curve.plot(pen=pg.mkPen('r', width=2, style=Qt.PenStyle.DashLine), name="Retrace")
 
-        # Customize ImageView appearance (optional) - applied to instances from setupUi
+        # Customize ImageView appearance
         self.adc_0_scan_image.ui.histogram.hide()
         self.adc_0_scan_image.ui.roiBtn.hide()
         self.adc_0_scan_image.ui.menuBtn.hide()
         self.adc_0_scan_image.getView().setAspectLocked(True)
-        self.adc_0_scan_image.getView().invertY(False) # Adjust as needed
-        # ImageView doesn't have getPlotItem() - use a label above it instead
-        # Add a title to the parent layout or container if needed
+        self.adc_0_scan_image.getView().invertY(False)
 
         self.dac_z_scan_image.ui.histogram.hide()
         self.dac_z_scan_image.ui.roiBtn.hide()
         self.dac_z_scan_image.ui.menuBtn.hide()
         self.dac_z_scan_image.getView().setAspectLocked(True)
-        self.dac_z_scan_image.getView().invertY(False) # Adjust as needed
-        # ImageView doesn't have getPlotItem() - use a label above it instead
-        # --- End Plot/Image Init ---
+        self.dac_z_scan_image.getView().invertY(False)
 
         # Connect buttons
         self.start_scan_button.clicked.connect(self.start_scan)
@@ -351,12 +347,12 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
         # Timer for updating the display
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_display)
-        self.timer.start(100) # Start timer conditionally or based on connection? Start later.
+        self.timer.start(100)  # Update every 100ms
 
         # Internal state
         self.last_scan_data_count = 0
         self.total_scan_points = 0
-        self.current_resolution = 0 # Store resolution used for scan
+        self.current_resolution = 0
 
         # Create data directory if it doesn't exist
         self.data_dir = "data"
@@ -367,30 +363,165 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
         self._last_trace_count = 0
         self._last_retrace_count = 0
 
-    def generate_filename(self, scan_type: str, channel: str) -> str:
-        """Generate a filename for saving scan data.
-        
-        Args:
-            scan_type (str): "trace" or "retrace"
-            channel (str): "adc0" or "dacz"
+    def start_scan(self):
+        """Start the scan procedure."""
+        if not self.afm.is_connected():
+            QMessageBox.warning(self, "Not Connected", "Please connect to AFM first")
+            return
+
+        if self.afm.is_scan_running():
+            QMessageBox.warning(self, "Already Running", "Scan is already running")
+            return
+
+        try:
+            # Get parameters from UI
+            x_start = int(self.x_start_input.text())
+            x_end = int(self.x_end_input.text())
+            y_start = int(self.y_start_input.text())
+            y_end = int(self.y_end_input.text())
+            resolution = int(self.scan_resolution_input.text())
+            line_frequency_hz = float(self.line_frequency_input.text())
+
+            # Validation
+            if not all(0 <= v <= 65535 for v in [x_start, x_end, y_start, y_end]):
+                QMessageBox.warning(self, "Invalid Input", "DAC coordinates must be between 0 and 65535")
+                return
+            if x_start >= x_end or y_start >= y_end:
+                QMessageBox.warning(self, "Invalid Input", "Start coordinates must be less than End coordinates")
+                return
+            if resolution < 2:
+                QMessageBox.warning(self, "Invalid Input", "Resolution must be at least 2")
+                return
+            if line_frequency_hz <= 0:
+                QMessageBox.warning(self, "Invalid Input", "Line frequency must be positive")
+                return
+
+            # Prepare for new scan
+            self.last_scan_data_count = 0
+            self.total_scan_points = resolution * resolution
+            self.current_resolution = resolution
+            self.adc_0_scan_image.clear()
+            self.dac_z_scan_image.clear()
+            self.adc_0_line_plot.clear()
+            self.dac_z_line_plot.clear()
+            self.scanning_button.setChecked(True)
+            self.timer.start(100)
+
+            # Start scan in AFM class
+            success = self.afm.start_scan(
+                x_start=x_start,
+                x_end=x_end,
+                y_start=y_start,
+                y_end=y_end,
+                resolution=resolution,
+                line_frequency_hz=line_frequency_hz
+            )
+
+            if not success:
+                self.scanning_button.setChecked(False)
+                self.total_scan_points = 0
+                self.current_resolution = 0
+                self.timer.stop()
+                QMessageBox.warning(self, "Error", "Failed to start scan (check AFM state or connection)")
+
+        except ValueError:
+            self.scanning_button.setChecked(False)
+            self.timer.stop()
+            QMessageBox.warning(self, "Invalid Input", "Please enter valid numbers for scan parameters.")
+
+    def stop_scan_wrapper(self):
+        """Wrapper to stop the scan procedure."""
+        self.timer.stop()
+        print("GUI: Stopping update timer.")
+
+        if not self.afm.is_connected():
+            self.scanning_button.setChecked(False)
+            return
+
+        if not self.afm.is_scan_running():
+            self.scanning_button.setChecked(False)
+            return
+
+        print("GUI: Attempting to stop scan...")
+        success = self.afm.stop_scan()
+
+        self.scanning_button.setChecked(False)
+        if not success:
+            QMessageBox.warning(self, "Stop Scan", "Sent stop command, but confirmation failed or hardware issue suspected.")
+        else:
+            print("GUI: Scan stop confirmed or initiated.")
+
+    def update_display(self):
+        """Update the display with the latest scan data."""
+        try:
+            # Get the current scan data counts
+            trace_count = self.afm.get_scan_data_count("trace")
+            retrace_count = self.afm.get_scan_data_count("retrace")
             
-        Returns:
-            str: Generated filename with path
-        """
-        # Get current timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Get resolution from current scan
-        resolution = self.afm.scan_resolution
-        
-        # Generate base filename
-        base_filename = f"{timestamp}_{scan_type}_{channel}_{resolution}x{resolution}.tiff"
-        
-        # Combine with data directory
-        return os.path.join(self.data_dir, base_filename)
+            # Only update if we have new data
+            if trace_count == self._last_trace_count and retrace_count == self._last_retrace_count:
+                return
+                
+            self._last_trace_count = trace_count
+            self._last_retrace_count = retrace_count
+            
+            # Get images for both channels
+            adc0_image = self.afm.get_scan_image(channel_index=0, scan_type="trace")
+            dacz_image = self.afm.get_scan_image(channel_index=1, scan_type="trace")
+            
+            if adc0_image is not None:
+                # Calculate min and max values, handling NaN values
+                valid_values = adc0_image[~np.isnan(adc0_image)]
+                if len(valid_values) > 0:
+                    min_val = np.min(valid_values)
+                    max_val = np.max(valid_values)
+                    if min_val == max_val:
+                        min_val -= 1
+                        max_val += 1
+                else:
+                    min_val = 0
+                    max_val = 1
+                self.adc_0_scan_image.setImage(adc0_image)
+                self.adc_0_scan_image.setLevels(min_val, max_val)
+                
+            if dacz_image is not None:
+                valid_values = dacz_image[~np.isnan(dacz_image)]
+                if len(valid_values) > 0:
+                    min_val = np.min(valid_values)
+                    max_val = np.max(valid_values)
+                    if min_val == max_val:
+                        min_val -= 1
+                        max_val += 1
+                else:
+                    min_val = 0
+                    max_val = 1
+                self.dac_z_scan_image.setImage(dacz_image)
+                self.dac_z_scan_image.setLevels(min_val, max_val)
+                
+            # Clear all line plots before updating
+            self.adc_0_line_plot.clear()
+            self.dac_z_line_plot.clear()
+            self.adc_0_retrace_plot.clear()
+            self.dac_z_retrace_plot.clear()
+                
+            # Get the last complete line for both trace and retrace
+            last_trace_line = self.afm.get_scan_line(scan_type="trace")
+            last_retrace_line = self.afm.get_scan_line(scan_type="retrace")
+            
+            if last_trace_line is not None:
+                self.adc_0_line_plot.setData(last_trace_line[:, 1], last_trace_line[:, 2], pen='b')
+                self.dac_z_line_plot.setData(last_trace_line[:, 1], last_trace_line[:, 3], pen='g')
+                
+            if last_retrace_line is not None:
+                self.adc_0_retrace_plot.setData(last_retrace_line[:, 1], last_retrace_line[:, 2], pen='r', style='--')
+                self.dac_z_retrace_plot.setData(last_retrace_line[:, 1], last_retrace_line[:, 3], pen='r', style='--')
+                
+        except Exception as e:
+            print(f"Error updating display: {e}")
+            traceback.print_exc()
 
     def save_scan_data(self):
-        """Save current scan data to CSV files."""
+        """Save current scan data to TIFF files."""
         if not self.afm.scan_data:
             QMessageBox.warning(self, "No Data", "No scan data available to save")
             return
@@ -400,10 +531,12 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
             filename = self.save_data_filename.text().strip()
             if not filename:
                 # Generate default filenames for both trace and retrace
-                trace_adc_filename = self.generate_filename("trace", "adc0")
-                trace_dacz_filename = self.generate_filename("trace", "dacz")
-                retrace_adc_filename = self.generate_filename("retrace", "adc0")
-                retrace_dacz_filename = self.generate_filename("retrace", "dacz")
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                resolution = self.afm.scan_resolution
+                trace_adc_filename = f"{self.data_dir}/{timestamp}_trace_adc0_{resolution}x{resolution}.tiff"
+                trace_dacz_filename = f"{self.data_dir}/{timestamp}_trace_dacz_{resolution}x{resolution}.tiff"
+                retrace_adc_filename = f"{self.data_dir}/{timestamp}_retrace_adc0_{resolution}x{resolution}.tiff"
+                retrace_dacz_filename = f"{self.data_dir}/{timestamp}_retrace_dacz_{resolution}x{resolution}.tiff"
             else:
                 # Use user-provided filename as base
                 base_path = os.path.join(self.data_dir, os.path.splitext(filename)[0])
@@ -446,190 +579,14 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error saving scan data: {str(e)}")
 
-    def start_scan(self):
-        """Start the scan procedure."""
-        if not self.afm.is_connected():
-            QMessageBox.warning(self, "Not Connected", "Please connect to AFM first")
-            return
-
-        if self.afm.is_scan_running():
-            QMessageBox.warning(self, "Already Running", "Scan is already running")
-            return
-
-        try:
-            # Get parameters from UI
-            x_start = int(self.x_start_input.text())
-            x_end = int(self.x_end_input.text())
-            y_start = int(self.y_start_input.text())
-            y_end = int(self.y_end_input.text())
-            resolution = int(self.scan_resolution_input.text())
-            dwell_time = int(self.dwell_time_input.text())
-
-            # Validation (moved from AFM class, good practice for GUI)
-            if not all(0 <= v <= 65535 for v in [x_start, x_end, y_start, y_end]):
-                QMessageBox.warning(self, "Invalid Input", "DAC coordinates must be between 0 and 65535")
-                return
-            # Allow start == end for single line scans? Maybe not for 2D.
-            if x_start >= x_end or y_start >= y_end:
-                QMessageBox.warning(self, "Invalid Input", "Start coordinates must be less than End coordinates")
-                return
-            if resolution < 2:
-                QMessageBox.warning(self, "Invalid Input", "Resolution must be at least 2")
-                return
-            if dwell_time < 0: # Should be positive? Or allow 0? Let's assume >= 0
-                QMessageBox.warning(self, "Invalid Input", "Dwell time must be non-negative")
-                return
-
-            # --- Prepare for new scan ---
-            self.last_scan_data_count = 0
-            self.total_scan_points = resolution * resolution
-            self.current_resolution = resolution # Store for plot updates
-            self.adc_0_scan_image.clear() # Clear previous image
-            self.dac_z_scan_image.clear() # Clear previous image
-            self.adc_0_line_plot.clear() # Clear previous line plot
-            self.dac_z_line_plot.clear() # Clear previous line plot
-            self.scanning_button.setChecked(True)
-            self.timer.start(100) # Start update timer only when scan starts
-
-            # Start scan in AFM class
-            success = self.afm.start_scan(
-                x_start=x_start,
-                x_end=x_end,
-                y_start=y_start,
-                y_end=y_end,
-                resolution=resolution,
-                dwell_time=dwell_time
-            )
-
-            if not success:
-                self.scanning_button.setChecked(False)
-                self.total_scan_points = 0
-                self.current_resolution = 0
-                self.timer.stop() # Stop timer if scan fails to start
-                QMessageBox.warning(self, "Error", "Failed to start scan (check AFM state or connection)")
-
-        except ValueError:
-            self.scanning_button.setChecked(False)
-            self.timer.stop() # Stop timer on invalid input
-            QMessageBox.warning(self, "Invalid Input", "Please enter valid integer values for scan parameters.")
-
-    def stop_scan_wrapper(self):
-        """Wrapper to stop the scan procedure."""
-        # Stop the timer first to prevent updates during/after stop
-        self.timer.stop()
-        print("GUI: Stopping update timer.")
-
-        if not self.afm.is_connected():
-            self.scanning_button.setChecked(False) # Ensure UI consistency
-            return
-
-        if not self.afm.is_scan_running():
-            # If not running according to AFM, ensure button is unchecked
-            self.scanning_button.setChecked(False)
-            return
-
-        # Attempt to stop
-        print("GUI: Attempting to stop scan...")
-        success = self.afm.stop_scan()
-
-        # Update UI regardless of success, AFM class manages internal state
-        self.scanning_button.setChecked(False)
-        if not success:
-            QMessageBox.warning(self, "Stop Scan", "Sent stop command, but confirmation failed or hardware issue suspected.")
-        else:
-            print("GUI: Scan stop confirmed or initiated.")
-        # Leave the last image/plot displayed
-
-    def update_display(self):
-        """Update the display with the latest scan data."""
-        try:
-            # Get the current scan data counts
-            trace_count = self.afm.get_scan_data_count("trace")
-            retrace_count = self.afm.get_scan_data_count("retrace")
-            
-            # Only update if we have new data
-            if trace_count == self._last_trace_count and retrace_count == self._last_retrace_count:
-                return
-                
-            self._last_trace_count = trace_count
-            self._last_retrace_count = retrace_count
-            
-            # Get images for both channels
-            adc0_image = self.afm.get_scan_image(channel_index=0, scan_type="trace")
-            dacz_image = self.afm.get_scan_image(channel_index=1, scan_type="trace")
-            
-            if adc0_image is not None:
-                # Calculate min and max values, handling NaN values
-                valid_values = adc0_image[~np.isnan(adc0_image)]
-                if len(valid_values) > 0:
-                    min_val = np.min(valid_values)
-                    max_val = np.max(valid_values)
-                    # If all values are the same, add a small range
-                    if min_val == max_val:
-                        min_val -= 1
-                        max_val += 1
-                else:
-                    # If no valid values, use default range
-                    min_val = 0
-                    max_val = 1
-                self.adc_0_scan_image.setImage(adc0_image)
-                self.adc_0_scan_image.setLevels(min_val, max_val)
-                
-            if dacz_image is not None:
-                # Calculate min and max values, handling NaN values
-                valid_values = dacz_image[~np.isnan(dacz_image)]
-                if len(valid_values) > 0:
-                    min_val = np.min(valid_values)
-                    max_val = np.max(valid_values)
-                    # If all values are the same, add a small range
-                    if min_val == max_val:
-                        min_val -= 1
-                        max_val += 1
-                else:
-                    # If no valid values, use default range
-                    min_val = 0
-                    max_val = 1
-                self.dac_z_scan_image.setImage(dacz_image)
-                self.dac_z_scan_image.setLevels(min_val, max_val)
-                
-            # Clear all line plots before updating
-            self.adc_0_line_plot.clear()
-            self.dac_z_line_plot.clear()
-            self.adc_0_retrace_plot.clear()
-            self.dac_z_retrace_plot.clear()
-                
-            # Get the last complete line for both trace and retrace
-            last_trace_line = self.afm.get_scan_line(scan_type="trace")
-            last_retrace_line = self.afm.get_scan_line(scan_type="retrace")
-            
-            if last_trace_line is not None:
-                # Update ADC0 trace plot using raw y coordinates
-                self.adc_0_line_plot.setData(last_trace_line[:, 1], last_trace_line[:, 2], pen='b')
-                
-                # Update DACZ trace plot using raw y coordinates
-                self.dac_z_line_plot.setData(last_trace_line[:, 1], last_trace_line[:, 3], pen='g')
-                
-            if last_retrace_line is not None:
-                # Update ADC0 retrace plot using raw y coordinates
-                self.adc_0_retrace_plot.setData(last_retrace_line[:, 1], last_retrace_line[:, 2], pen='r', style='--')
-                
-                # Update DACZ retrace plot using raw y coordinates
-                self.dac_z_retrace_plot.setData(last_retrace_line[:, 1], last_retrace_line[:, 3], pen='r', style='--')
-                
-            
-        except Exception as e:
-            print(f"Error updating display: {e}")
-            traceback.print_exc()  # Print full traceback for debugging
-
     def closeEvent(self, event):
         """Ensure timer is stopped and scan is stopped when window closes."""
         print("Stopping ScanWidget timer...")
         self.timer.stop()
         if self.afm.is_scan_running():
              print("Scan is running, attempting to stop it...")
-             # Directly call stop_scan, wrapper might have UI interactions undesirable on close
              self.afm.stop_scan()
-        super().closeEvent(event) # Accept the close event
+        super().closeEvent(event)
 
 
 class MainWindow(QMainWindow, Ui_MainWindow):

@@ -2,13 +2,18 @@
 #include "ads8681.hpp"
 #include <ArduinoJson.h>
 #include <atomic>
+#include <mutex>
 #include "esp_task_wdt.h"
 #include <cstring> // Needed for memcpy
+#include <WiFi.h>  // Add WiFi library
 
 // For thread synchronization
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/portmacro.h"
+
+// Forward declarations
+void sendScanDataBuffer();
 
 // ============================================================================
 // PID Controller Class
@@ -187,6 +192,19 @@ static const int MAX_APPROACH_POINTS = 1000;
 #define Z_CYCLE_STEPS 1000             // Fixed number of steps for Z probe/retract cycle
 #define Z_STEP_DELAY_US 1              // Delay between Z DAC steps in approach cycle (us)
 
+// Scan Data Point Structure
+struct ScanDataPoint {
+    uint16_t i;          // X index in the scan grid
+    uint16_t j;          // Y index in the scan grid
+    uint16_t adc_0;      // ADC reading
+    uint16_t dac_z;      // Current Z DAC value
+    bool is_trace;       // true for trace, false for retrace
+};
+
+// Scan Buffer Constants
+const int SCAN_BUFFER_SIZE = 256;
+ScanDataPoint scan_buffer[SCAN_BUFFER_SIZE];  // Remove extern keyword
+
 // ============================================================================
 // Hardware Configuration
 // ============================================================================
@@ -284,14 +302,14 @@ struct AFMState
     // ADC Moving Average
     float adc_0_avg = 0.0f;
     float adc_1_avg = 0.0f;
-    uint16_t adc_0_history[MAX_ADC_AVG_WINDOW_SIZE]; // Use MAX size
-    uint16_t adc_1_history[MAX_ADC_AVG_WINDOW_SIZE]; // Use MAX size
+    uint16_t adc_0_history[MAX_ADC_AVG_WINDOW_SIZE];
+    uint16_t adc_1_history[MAX_ADC_AVG_WINDOW_SIZE];
     uint8_t adc_history_index = 0;
     uint8_t adc_history_count = 0;
-    uint8_t adc_avg_window_size = 3; // Default window size, configurable
+    uint8_t adc_avg_window_size = 3;
 
     // Motor States
-    MotorState motors[3]; // Index 0-2 for motors 1-3
+    MotorState motors[3];
 
     // System State
     int32_t timestamp = 0;
@@ -300,7 +318,7 @@ struct AFMState
     // PID Control
     bool pid_enabled = false;
     float pid_target = 0.0f;
-    PIDController pid_controller; // Using default constructor values
+    PIDController pid_controller;
 
     // Approach Data
     struct ApproachData
@@ -319,30 +337,16 @@ struct AFMState
     float approach_initial_adc = 0.0f;
     int32_t approach_initial_position = 0;
     int32_t approach_max_steps = 0;
-    unsigned long approach_polling_interval = 50; // ms - NOTE: No longer used for blocking delay
+    unsigned long approach_polling_interval = 50;
     unsigned long approach_last_update = 0;
-    int32_t approach_last_stored_step = 0;  // Track last stored step
-    unsigned int approach_step_delay = 500; // Default step delay in microseconds (renamed from speed)
-    int32_t approach_total_steps_taken = 0; // Track total steps taken
-    // Z-cycle specific state
-    // uint16_t dac_z_probe_target = DAC_Z_PROBE_TARGET; // REMOVED - Target Z DAC value for probing (closer to 0)
-    // uint16_t dac_z_retract_target = DAC_Z_RETRACT_TARGET; // REMOVED - Target Z DAC value when retracted (mid-scale)
-    // int z_cycle_steps = 100; // REMOVED - Number of steps for Z probe/retract cycle
+    int32_t approach_last_stored_step = 0;
+    unsigned int approach_step_delay = 500;
+    int32_t approach_total_steps_taken = 0;
 
-    // Scan Data & State (using Ring Buffer)
-    struct ScanPoint
-    {
-        uint16_t x;
-        uint16_t y;
-        uint16_t adc0;
-        uint16_t dacz;
-        uint8_t flags; // Store flags with each point rather than computing at send time
-    };
-    static const int MAX_SCAN_POINTS = 256; // Size of the ring buffer
-    ScanPoint scan_data[MAX_SCAN_POINTS];
-    uint16_t scan_buffer_head = 0;  // Index where next point will be written
-    uint16_t scan_buffer_tail = 0;  // Index from where next point will be sent
-    uint16_t scan_buffer_count = 0; // Number of points currently in the buffer
+    // Scan Data & State
+    uint16_t scan_buffer_head = 0;
+    uint16_t scan_buffer_tail = 0;
+    uint16_t scan_buffer_count = 0;
     bool scan_active = false;
     uint16_t scan_x_start = 0;
     uint16_t scan_x_end = 0;
@@ -350,35 +354,42 @@ struct AFMState
     uint16_t scan_y_end = 0;
     uint16_t scan_resolution = 256;
     uint16_t scan_current_x_index = 0;
-    uint16_t scan_current_y_index = 0;
     uint16_t scan_current_x = 0;
-    uint16_t scan_current_y = 0;
-    bool scan_y_forward = true;    // Direction for serpentine scan
-    bool scan_return_line = false; // True when scanning the return (second) line for an X position
-    unsigned long scan_last_point_time = 0;
-    unsigned int scan_dwell_time = 1; // ms between points
+    bool scan_y_forward = true;
+    // Removed unused variables: scan_return_line, scan_last_point_time, scan_current_y_index, scan_current_y
 
-    // Control Loop Timing - Switched to Period/Frequency Measurement
-    uint32_t control_loop_last_period_us = 0;  // Period of the last full loop iteration
-    uint64_t control_loop_total_period_us = 0; // Use 64-bit to prevent quick overflow
-    uint32_t control_loop_count = 0;           // Count for averaging period
+    // Continuous Scan State
+    bool scan_continuous_y = false;
+    float scan_y_velocity = 0.0f;
+    uint16_t scan_y_current_dac = 0;
+    uint64_t scan_y_ramp_start_time_us = 0;
+    uint64_t scan_next_point_time_us = 0;
+    uint64_t scan_point_interval_us = 0;
+    int32_t scan_y_steps_taken = 0;
+    int32_t scan_points_per_line = 0;
+    float scan_line_frequency_hz = 0.0f;
+
+    // Control Loop Timing
+    uint32_t control_loop_last_period_us = 0;
+    uint64_t control_loop_total_period_us = 0;
+    uint32_t control_loop_count = 0;
 
     // DAC XY Ramping State
     bool ramp_active = false;
     uint16_t ramp_target_x = 0;
     uint16_t ramp_target_y = 0;
-    uint16_t ramp_target_z = 0; // Added Z ramp target
+    uint16_t ramp_target_z = 0;
     uint16_t ramp_start_x = 0;
     uint16_t ramp_start_y = 0;
-    uint16_t ramp_start_z = 0; // Added Z ramp start
+    uint16_t ramp_start_z = 0;
     int32_t ramp_delta_x = 0;
     int32_t ramp_delta_y = 0;
-    int32_t ramp_delta_z = 0;    // Added Z ramp delta
-    int ramp_duration_ms = 1000; // Default duration
-    int ramp_step_delay_ms = 1;  // Default step delay
+    int32_t ramp_delta_z = 0;
+    int ramp_duration_ms = 1000;
+    int ramp_step_delay_ms = 1;
     int ramp_total_steps = 0;
     int ramp_current_step = 0;
-    uint64_t ramp_next_step_time_us = 0; // Use microsecond timer
+    uint64_t ramp_next_step_time_us = 0;
 };
 
 // ============================================================================
@@ -634,12 +645,10 @@ void updateAFMState()
         return;
     if (acquireADC())
     {
-        delayMicroseconds(1);
         uint16_t new_adc0 = adc_0.readADC();
-        delayMicroseconds(1);
-        uint16_t new_adc1 = adc_1.readADC();
-        delayMicroseconds(1);
-        current_afm_state.timestamp = millis();
+        // uint16_t new_adc1 = adc_1.readADC();
+        uint16_t new_adc1 = 0;
+        current_afm_state.timestamp = millis(); // Update timestamp with current time
         releaseADC();
 
         // Update raw ADC values
@@ -926,6 +935,9 @@ void updateApproach()
 // Scan Control Functions
 // ============================================================================
 
+// Forward declaration
+void sendScanDataBuffer();
+
 void stopScan()
 {
     DEBUG_PRINTLN("# DEBUG: Inside stopScan()");
@@ -938,15 +950,15 @@ void stopScan()
             DEBUG_PRINTLN("# DEBUG: Setting state to IDLE");
             current_afm_state.current_state = SystemState::IDLE;
         }
-        // Signal to send any remaining data in the buffer
-        if (current_afm_state.scan_buffer_count > 0)
-        { // Check buffer count
-            DEBUG_PRINTLN("# DEBUG: Setting scan_data_ready_to_send to true");
-            scan_data_ready_to_send = true;
+        
+        // Ensure all data is sent before sending completion message
+        while (current_afm_state.scan_buffer_count > 0)
+        {
+            sendScanDataBuffer();
+            delay(1); // Small delay to allow serial buffer to clear
         }
-
+        
         // Send explicit JSON command indicating scan completion
-        // This will be recognized as a command by the PC, not just a comment
         JsonDocument scanCompleteDoc;
         scanCompleteDoc["command"] = "scan";
         scanCompleteDoc["status"] = "complete";
@@ -955,6 +967,7 @@ void stopScan()
         String output;
         serializeJson(scanCompleteDoc, output);
         Serial.println(output);
+        Serial.flush(); // Ensure completion message is sent
     }
     else
     {
@@ -980,9 +993,6 @@ uint16_t calculateDacValue(uint16_t start, uint16_t end, uint16_t index, uint16_
 
     return start + offset;
 }
-
-// Forward declaration for the helper function
-void sendScanDataBuffer();
 
 // Function to update DAC ramping state machine
 void updateDacRamp()
@@ -1058,16 +1068,29 @@ void updateDacRamp()
 }
 
 bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_end,
-               uint16_t resolution, unsigned int dwell_time)
+               uint16_t resolution, float line_frequency_hz)
 {
+    DEBUG_PRINTLN("# DEBUG: Starting scan with parameters:");
+    DEBUG_PRINTF("# DEBUG: x_start=%d, x_end=%d, y_start=%d, y_end=%d, resolution=%d, line_frequency_hz=%.2f\n",
+                 x_start, x_end, y_start, y_end, resolution, line_frequency_hz);
+
     // Basic validation
-    if (resolution < 2)
+    if (resolution < 2 || line_frequency_hz <= 0.0f)
+    {
+        DEBUG_PRINTLN("# DEBUG: Invalid resolution or line frequency");
         return false;
+    }
     if (x_start > x_end || y_start > y_end)
+    {
+        DEBUG_PRINTLN("# DEBUG: Invalid range (start > end)");
         return false;
+    }
     // Prevent starting if already scanning, moving, approaching, OR RAMPING
     if (current_afm_state.scan_active || isMotorMoving() || current_afm_state.approach_running || current_afm_state.ramp_active)
+    {
+        DEBUG_PRINTLN("# DEBUG: Cannot start scan - system busy");
         return false;
+    }
 
     // Store parameters
     current_afm_state.scan_x_start = x_start;
@@ -1075,17 +1098,33 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
     current_afm_state.scan_y_start = y_start;
     current_afm_state.scan_y_end = y_end;
     current_afm_state.scan_resolution = resolution;
-    current_afm_state.scan_dwell_time = dwell_time;
+    current_afm_state.scan_line_frequency_hz = line_frequency_hz;
+
+    // Calculate parameters for continuous scan
+    current_afm_state.scan_continuous_y = true; // Enable continuous mode
+    current_afm_state.scan_points_per_line = resolution;
+    uint32_t y_range = (y_end > y_start) ? (y_end - y_start) : (y_start - y_end);
+    
+    // Calculate total line time in microseconds from frequency
+    uint64_t total_line_time_us = (uint64_t)(1000000.0f / line_frequency_hz);
+    
+    // Calculate point interval based on resolution and line time
+    if (resolution > 1) {
+        current_afm_state.scan_point_interval_us = total_line_time_us / (resolution - 1);
+        // Calculate velocity (DAC units per microsecond)
+        current_afm_state.scan_y_velocity = (float)y_range / total_line_time_us;
+    } else {
+        current_afm_state.scan_point_interval_us = total_line_time_us;
+        current_afm_state.scan_y_velocity = 0;
+    }
+    if (current_afm_state.scan_point_interval_us == 0) current_afm_state.scan_point_interval_us = 1; // Avoid division by zero
 
     // Initialize scan state variables (indices, direction, etc.)
     current_afm_state.scan_current_x_index = 0;
-    current_afm_state.scan_current_y_index = 0;
     current_afm_state.scan_y_forward = true;
-    current_afm_state.scan_return_line = false;
     current_afm_state.scan_buffer_head = 0;
     current_afm_state.scan_buffer_tail = 0;
     current_afm_state.scan_buffer_count = 0;
-    current_afm_state.scan_last_point_time = millis(); // Use millis for dwell time check
 
     // Calculate target start position
     uint16_t target_x = calculateDacValue(x_start, x_end, 0, resolution);
@@ -1095,7 +1134,7 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
     uint16_t current_x = current_afm_state.dac_x_val;
     uint16_t current_y = current_afm_state.dac_y_val;
 
-    // --- Initiate Ramp if needed ---
+    // --- Initiate Ramp if needed (to first scan point) ---
     if (current_x != target_x || current_y != target_y)
     {
         current_afm_state.ramp_target_x = target_x;
@@ -1104,11 +1143,10 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
         current_afm_state.ramp_start_y = current_y;
         current_afm_state.ramp_delta_x = target_x - current_x;
         current_afm_state.ramp_delta_y = target_y - current_y;
-        // Use default duration/step for now, could be made parameters later
         current_afm_state.ramp_duration_ms = 1000;
         current_afm_state.ramp_step_delay_ms = 1;
         if (current_afm_state.ramp_step_delay_ms < 1)
-            current_afm_state.ramp_step_delay_ms = 1; // Sanity check
+            current_afm_state.ramp_step_delay_ms = 1;
         current_afm_state.ramp_total_steps = current_afm_state.ramp_duration_ms / current_afm_state.ramp_step_delay_ms;
 
         if (current_afm_state.ramp_total_steps > 0)
@@ -1119,7 +1157,6 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
         }
         else
         {
-            // Duration or step too small, just jump
             dac_x.write(target_x);
             dac_y.write(target_y);
             current_afm_state.dac_x_val = target_x;
@@ -1129,24 +1166,18 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
     }
     else
     {
-        // Already at the target, no ramp needed
         current_afm_state.ramp_active = false;
-        // Ensure state is correct even if no ramp occurred
         current_afm_state.dac_x_val = target_x;
         current_afm_state.dac_y_val = target_y;
     }
 
-    // Update scan state variable *after* initiating ramp or jumping
-    current_afm_state.scan_current_x = target_x; // Scan logic uses this as the target/current scan position
-    current_afm_state.scan_current_y = target_y;
+    current_afm_state.scan_current_x = target_x;
+    current_afm_state.scan_y_current_dac = target_y;
+    current_afm_state.scan_y_steps_taken = 0;
 
-    // Mark scan as active (even if ramping)
     current_afm_state.scan_active = true;
     current_afm_state.current_state = SystemState::SCANNING;
-
-    // NOTE: No delay here anymore, scan starts logically,
-    // but actual movement might be delayed by ramp.
-    // First point acquisition in updateScan will wait for dwell time anyway.
+    DEBUG_PRINTLN("# DEBUG: Scan started successfully");
 
     return true;
 }
@@ -1156,194 +1187,167 @@ void updateScan()
     if (!current_afm_state.scan_active)
         return;
 
+    // Wait for initial ramp to complete before starting data acquisition
     if (current_afm_state.ramp_active)
-    {
         return;
-    }
 
-    unsigned long current_time = millis();
-    if (current_time - current_afm_state.scan_last_point_time < current_afm_state.scan_dwell_time)
+    uint64_t current_time_us = esp_timer_get_time();
+
+    // Continuous Y-Ramp and data acquisition
+    if (current_afm_state.scan_continuous_y)
     {
-        return; // Wait for dwell time
-    }
-
-    // Calculate flags for this point
-    uint8_t point_flags = 0;
-    if (current_afm_state.scan_y_forward)
-        point_flags |= 0x01;
-    if (current_afm_state.scan_return_line)
-        point_flags |= 0x02;
-
-    // Prepare the data point before acquiring the mutex
-    AFMState::ScanPoint new_point = {
-        current_afm_state.scan_current_x,
-        current_afm_state.scan_current_y,
-        current_afm_state.adc_0_val,
-        current_afm_state.dac_z_val,
-        point_flags};
-
-    // --- Ring Buffer Write Logic with Mutex Protection ---
-    // Take mutex with short timeout
-    if (xSemaphoreTake(scan_buffer_mutex, pdMS_TO_TICKS(5)) == pdTRUE)
-    {
-        // Critical section - protected by mutex
-
-        // Store data at the current head position
-        current_afm_state.scan_data[current_afm_state.scan_buffer_head] = new_point;
-
-        // Calculate next head position
-        uint16_t next_head = (current_afm_state.scan_buffer_head + 1) % current_afm_state.MAX_SCAN_POINTS;
-
-        // Check if buffer is full (about to overwrite tail)
-        if (current_afm_state.scan_buffer_count == current_afm_state.MAX_SCAN_POINTS)
+        // Check if it's time to acquire a new data point
+        if (current_time_us >= current_afm_state.scan_next_point_time_us)
         {
-            // Overwrite oldest data: advance tail
-            current_afm_state.scan_buffer_tail = (current_afm_state.scan_buffer_tail + 1) % current_afm_state.MAX_SCAN_POINTS;
-            // Count remains MAX_SCAN_POINTS
-        }
-        else
-        {
-            // Buffer not full: increment count
-            current_afm_state.scan_buffer_count++;
-        }
-
-        // Advance head
-        current_afm_state.scan_buffer_head = next_head;
-
-        // Signal that data is available (if buffer not empty)
-        if (current_afm_state.scan_buffer_count > 0)
-        {
-            scan_data_ready_to_send = true;
-        }
-
-        // Release mutex
-        xSemaphoreGive(scan_buffer_mutex);
-    }
-    else
-    {
-        // Could not obtain mutex - skip storing this point (better than deadlock)
-    }
-    // End of critical section
-    // --- End Ring Buffer Write Logic ---
-
-    // Calculate next position index
-    uint16_t next_x_index = current_afm_state.scan_current_x_index;
-    uint16_t next_y_index = current_afm_state.scan_current_y_index;
-    bool line_finished = false;
-    bool scan_finished = false; // Flag to check if the whole scan ended
-
-    if (current_afm_state.scan_y_forward)
-    {
-        // Moving forward (increasing Y index)
-        if (next_y_index + 1 >= current_afm_state.scan_resolution)
-        {
-            next_y_index = current_afm_state.scan_resolution - 1; // Clamp to last index
-            line_finished = true;
-            // Debug: Line ended at forward limit
-            DEBUG_PRINT("# DEBUG: Line finished at Y forward limit, X=");
-            DEBUG_PRINT(next_x_index);
-            DEBUG_PRINT(", return_line=");
-            DEBUG_PRINTLN(current_afm_state.scan_return_line ? "true" : "false");
-        }
-        else
-        {
-            next_y_index++;
-        }
-    }
-    else
-    {
-        // Moving backward (decreasing Y index)
-        if (next_y_index == 0)
-        {
-            // next_y_index remains 0
-            line_finished = true;
-            // Debug: Line ended at backward limit
-            DEBUG_PRINT("# DEBUG: Line finished at Y backward limit, X=");
-            DEBUG_PRINT(next_x_index);
-            DEBUG_PRINT(", return_line=");
-            DEBUG_PRINTLN(current_afm_state.scan_return_line ? "true" : "false");
-        }
-        else
-        {
-            next_y_index--;
-        }
-    }
-
-    if (line_finished)
-    {
-        // Check if we need to do a return line at the same X position
-        if (!current_afm_state.scan_return_line)
-        {
-            // We just finished the first scan direction, now do the return line
-            current_afm_state.scan_return_line = true;
-            current_afm_state.scan_y_forward = false; // Always go backward for retrace
-            // next_y_index is already at the right end position for the return line
-            DEBUG_PRINT("# DEBUG: Starting return line at X=");
-            DEBUG_PRINTLN(next_x_index);
-        }
-        else
-        {
-            // We finished both scan directions for this X position, move to next X
-            current_afm_state.scan_return_line = false; // Reset for the new X position
-            current_afm_state.scan_y_forward = true;    // Always reset to forward for new X position
-
-            // Check if we've finished the entire scan (all X positions)
-            if (next_x_index + 1 >= current_afm_state.scan_resolution)
+            // Calculate current Y DAC value based on steps taken
+            uint16_t current_y_dac;
+            if (current_afm_state.scan_y_forward)
             {
-                scan_finished = true;
-                DEBUG_PRINTLN("# DEBUG: Scan complete! Setting scan_finished=true");
+                current_y_dac = calculateDacValue(
+                    current_afm_state.scan_y_start,
+                    current_afm_state.scan_y_end,
+                    current_afm_state.scan_y_steps_taken,
+                    current_afm_state.scan_points_per_line);
             }
             else
             {
-                next_x_index++; // Move to next X position
-                DEBUG_PRINT("# DEBUG: Moving to next X position: ");
-                DEBUG_PRINTLN(next_x_index);
+                current_y_dac = calculateDacValue(
+                    current_afm_state.scan_y_end,
+                    current_afm_state.scan_y_start,
+                    current_afm_state.scan_y_steps_taken,
+                    current_afm_state.scan_points_per_line);
             }
+
+            // Prepare new data point with indices
+            ScanDataPoint new_point;
+            new_point.i = current_afm_state.scan_current_x_index;
+            // For retrace, j index counts down from resolution-1 to 0
+            new_point.j = current_afm_state.scan_y_forward ? 
+                current_afm_state.scan_y_steps_taken : 
+                (current_afm_state.scan_points_per_line - 1 - current_afm_state.scan_y_steps_taken);
+            new_point.adc_0 = adc_0.readADC();
+            new_point.dac_z = current_afm_state.dac_z_val;
+            new_point.is_trace = current_afm_state.scan_y_forward;
+
+            // Store the data point
+            {
+                if (xSemaphoreTake(scan_buffer_mutex, pdMS_TO_TICKS(5)) == pdTRUE)
+                {
+                    if (current_afm_state.scan_buffer_count < SCAN_BUFFER_SIZE)
+                    {
+                        scan_buffer[current_afm_state.scan_buffer_head] = new_point;
+                        current_afm_state.scan_buffer_head = (current_afm_state.scan_buffer_head + 1) % SCAN_BUFFER_SIZE;
+                        current_afm_state.scan_buffer_count++;
+                        scan_data_ready_to_send = true;
+                    }
+                    xSemaphoreGive(scan_buffer_mutex);
+                }
+            }
+
+            // Update Y position tracking
+            current_afm_state.scan_y_current_dac = current_y_dac;
+            current_afm_state.scan_y_steps_taken++;
+
+            // Check if we've completed a Y line (either trace or retrace)
+            if (current_afm_state.scan_y_steps_taken >= current_afm_state.scan_points_per_line)
+            {
+                // If we just completed a trace, start retrace
+                if (current_afm_state.scan_y_forward)
+                {
+                    current_afm_state.scan_y_forward = false;
+                    current_afm_state.scan_y_steps_taken = 0;
+                }
+                // If we just completed a retrace, move to next X position
+                else
+                {
+                    current_afm_state.scan_y_forward = true;
+                    current_afm_state.scan_y_steps_taken = 0;
+
+                    // Move to next X position
+                    current_afm_state.scan_current_x_index++;
+                    if (current_afm_state.scan_current_x_index >= current_afm_state.scan_resolution)
+                    {
+                        // Print last point information
+                        JsonDocument lastPointDoc;
+                        lastPointDoc["command"] = "scan";
+                        lastPointDoc["status"] = "last_point";
+                        lastPointDoc["x_index"] = current_afm_state.scan_current_x_index - 1;
+                        lastPointDoc["y_index"] = current_afm_state.scan_points_per_line - 1;
+                        lastPointDoc["adc_0"] = current_afm_state.adc_0_val;
+                        lastPointDoc["dac_z"] = current_afm_state.dac_z_val;
+                        lastPointDoc["is_trace"] = false;
+                        String lastPointOutput;
+                        serializeJson(lastPointDoc, lastPointOutput);
+                        Serial.println(lastPointOutput);
+                        Serial.flush();
+
+                        // Ensure all data is sent before sending completion message
+                        while (current_afm_state.scan_buffer_count > 0)
+                        {
+                            sendScanDataBuffer();
+                            delay(1); // Small delay to allow serial buffer to clear
+                        }
+                        
+                        // Scan complete - send completion message
+                        JsonDocument scanCompleteDoc;
+                        scanCompleteDoc["command"] = "scan";
+                        scanCompleteDoc["status"] = "complete";
+                        scanCompleteDoc["message"] = "Scan has been completed";
+                        scanCompleteDoc["timestamp"] = millis();
+                        String output;
+                        serializeJson(scanCompleteDoc, output);
+                        Serial.println(output);
+                        Serial.flush();
+
+                        // Update state
+                        current_afm_state.scan_active = false;
+                        current_afm_state.current_state = SystemState::IDLE;
+                        return;
+                    }
+
+                    // Calculate and set new X position
+                    uint16_t new_x = calculateDacValue(
+                        current_afm_state.scan_x_start,
+                        current_afm_state.scan_x_end,
+                        current_afm_state.scan_current_x_index,
+                        current_afm_state.scan_resolution);
+                    dac_x.write(new_x);
+                    current_afm_state.scan_current_x = new_x;
+                }
+            }
+
+            // Schedule next data point acquisition
+            current_afm_state.scan_next_point_time_us = current_time_us + current_afm_state.scan_point_interval_us;
+        }
+
+        // Update Y-DAC position based on elapsed time for smooth movement
+        uint64_t elapsed_time_us = current_time_us - current_afm_state.scan_y_ramp_start_time_us;
+        float y_delta = current_afm_state.scan_y_velocity * elapsed_time_us;
+        
+        uint16_t new_y_dac;
+        if (current_afm_state.scan_y_forward)
+        {
+            new_y_dac = current_afm_state.scan_y_start + (uint16_t)y_delta;
+            if (new_y_dac > current_afm_state.scan_y_end)
+                new_y_dac = current_afm_state.scan_y_end;
+        }
+        else
+        {
+            new_y_dac = current_afm_state.scan_y_end - (uint16_t)y_delta;
+            if (new_y_dac < current_afm_state.scan_y_start)
+                new_y_dac = current_afm_state.scan_y_start;
+        }
+
+        // Only update DAC if position has changed
+        if (new_y_dac != current_afm_state.dac_y_val)
+        {
+            dac_y.write(new_y_dac);
+            current_afm_state.dac_y_val = new_y_dac;
         }
     }
-
-    // Check if the entire scan is finished AFTER processing the last point
-    if (scan_finished)
-    {
-        DEBUG_PRINTLN("# DEBUG: Calling stopScan()");
-        // stopScan() will handle flagging remaining data if needed
-        stopScan(); // Now stop the scan formally
-        DEBUG_PRINT("# DEBUG: After stopScan(), scan_active=");
-        DEBUG_PRINTLN(current_afm_state.scan_active ? "true" : "false");
-        return; // Exit updateScan as scan is complete
-    }
-
-    // Update indices in state
-    current_afm_state.scan_current_x_index = next_x_index;
-    current_afm_state.scan_current_y_index = next_y_index;
-
-    // Calculate new DAC target values based on updated indices
-    uint16_t next_x_dac = calculateDacValue(current_afm_state.scan_x_start, current_afm_state.scan_x_end,
-                                            current_afm_state.scan_current_x_index, current_afm_state.scan_resolution);
-    uint16_t next_y_dac = calculateDacValue(current_afm_state.scan_y_start, current_afm_state.scan_y_end,
-                                            current_afm_state.scan_current_y_index, current_afm_state.scan_resolution);
-
-    // Check if position actually changed before writing DACs (optimization)
-    bool position_changed = (next_x_dac != current_afm_state.scan_current_x) || (next_y_dac != current_afm_state.scan_current_y);
-
-    // Update current position state
-    current_afm_state.scan_current_x = next_x_dac;
-    current_afm_state.scan_current_y = next_y_dac;
-
-    // Update DACs if position changed
-    if (position_changed)
-    {
-        dac_x.write(current_afm_state.scan_current_x);
-        dac_y.write(current_afm_state.scan_current_y);
-        // Update state dac values immediately after writing
-        current_afm_state.dac_x_val = current_afm_state.scan_current_x;
-        current_afm_state.dac_y_val = current_afm_state.scan_current_y;
-    }
-
-    current_afm_state.scan_last_point_time = current_time; // Update time for the *start* of the next dwell
 }
 
-// Modify sendScanDataBuffer to send CSV data
+// Modify sendScanDataBuffer to send CSV data with indices
 void sendScanDataBuffer()
 {
     // Check if the flag is set (indicates potential data)
@@ -1354,9 +1358,7 @@ void sendScanDataBuffer()
 
     // Local variables for data to be sent outside the critical section
     int points_to_send = 0;
-    // Create a temporary buffer to hold points to send
-    // This avoids holding the mutex while formatting/sending strings
-    AFMState::ScanPoint points_buffer[SCAN_SEND_CHUNK_SIZE];
+    ScanDataPoint points_buffer[SCAN_SEND_CHUNK_SIZE];
     bool is_final_data = false;
 
     // --- Critical section: Copy data from ring buffer ---
@@ -1376,13 +1378,13 @@ void sendScanDataBuffer()
         // Copy the points to the temporary buffer
         for (int i = 0; i < points_to_send; i++)
         {
-            int idx = (current_afm_state.scan_buffer_tail + i) % current_afm_state.MAX_SCAN_POINTS;
-            points_buffer[i] = current_afm_state.scan_data[idx];
+            int idx = (current_afm_state.scan_buffer_tail + i) % SCAN_BUFFER_SIZE;
+            points_buffer[i] = scan_buffer[idx];
         }
 
         // Update ring buffer state (tail and count)
         current_afm_state.scan_buffer_tail =
-            (current_afm_state.scan_buffer_tail + points_to_send) % current_afm_state.MAX_SCAN_POINTS;
+            (current_afm_state.scan_buffer_tail + points_to_send) % SCAN_BUFFER_SIZE;
         current_afm_state.scan_buffer_count -= points_to_send;
 
         // Check if this is the final batch of data and scan is no longer active
@@ -1407,21 +1409,18 @@ void sendScanDataBuffer()
     // --- Send data as CSV lines (outside mutex) ---
     for (int i = 0; i < points_to_send; i++)
     {
-        const AFMState::ScanPoint &point = points_buffer[i];
-        // Format: x,y,adc0,dacz,flags\n
-        Serial.print(point.x);
+        const ScanDataPoint &point = points_buffer[i];
+        // Format: i,j,adc_0,dac_z,is_trace\n
+        Serial.print(point.i);
         Serial.print(",");
-        Serial.print(point.y);
+        Serial.print(point.j);
         Serial.print(",");
-        Serial.print(point.adc0);
+        Serial.print(point.adc_0);
         Serial.print(",");
-        Serial.print(point.dacz);
+        Serial.print(point.dac_z);
         Serial.print(",");
-        Serial.println(point.flags);
+        Serial.println(point.is_trace ? "1" : "0");
     }
-
-    // Optional: Wait for transmit buffer to empty slightly
-    // Serial.flush(); // Or delayMicroseconds(50);
 }
 
 // ============================================================================
@@ -1542,12 +1541,7 @@ String processCommand(const String &json_command)
     else if (strcmp(command, "get_status") == 0)
     {
         response = getAFMStateAsJson();
-        // Serialize and print as before
-        String output;
-        serializeJson(response, output);
-        Serial.println(output);
-        // Add flush to wait for transmission to complete
-        Serial.flush();
+        response["status"] = "success";
     }
     else if (strcmp(command, "read_adc") == 0)
     {
@@ -1836,10 +1830,6 @@ String processCommand(const String &json_command)
             // Signal the background process (updateApproach) to stop
             stopApproach();                  // Calls the flag-setting function
             response["status"] = "stopping"; // Indicate stop was requested
-            // Optional: Add check if it was already stopped
-            // if (!current_afm_state.approach_running && current_afm_state.current_state != SystemState::APPROACHING) {
-            //     response["message"] = "Approach not running.";
-            // }
         }
         else if (doc["action"] == "get_data")
         {
@@ -1863,8 +1853,8 @@ String processCommand(const String &json_command)
     }
     else if (strcmp(command, "scan") == 0)
     {
-        // Example Start Scan Command:
-        // {"command":"scan","action":"start","x_start":10000,"x_end":55000,"y_start":10000,"y_end":55000,"resolution":16,"dwell_time":2}
+        // Example Start Scan Command (Continuous):
+        // {"command":"scan","action":"start","x_start":10000,"x_end":55000,"y_start":10000,"y_end":55000,"resolution":16,"line_time_ms":100}
 
         if (doc["action"] == "start")
         {
@@ -1873,13 +1863,13 @@ String processCommand(const String &json_command)
             const auto &y_start_param = doc["y_start"];
             const auto &y_end_param = doc["y_end"];
             const auto &resolution_param = doc["resolution"];
-            const auto &dwell_time_param = doc["dwell_time"];
+            const auto &line_frequency_param = doc["line_frequency_hz"]; // New parameter
 
             if (!x_start_param.is<int>() || !x_end_param.is<int>() || !y_start_param.is<int>() ||
-                !y_end_param.is<int>() || !resolution_param.is<int>() || !dwell_time_param.is<int>())
+                !y_end_param.is<int>() || !resolution_param.is<int>() || !line_frequency_param.is<float>()) // Check new parameter
             {
                 response["status"] = "error";
-                response["message"] = "Missing or invalid required parameters (x_start, x_end, y_start, y_end, resolution, dwell_time must be integers)";
+                response["message"] = "Missing or invalid required parameters (x_start, x_end, y_start, y_end, resolution, line_frequency_hz must be integers)";
             }
             else if (x_start_param.as<int>() < 0 || x_start_param.as<int>() > 65535 ||
                      x_end_param.as<int>() < 0 || x_end_param.as<int>() > 65535 ||
@@ -1899,23 +1889,24 @@ String processCommand(const String &json_command)
                 response["status"] = "error";
                 response["message"] = "Resolution must be at least 2";
             }
-            else if (dwell_time_param.as<int>() < 0)
+            else if (line_frequency_param.as<float>() <= 0.0f) // line_frequency_hz must be positive
             {
                 response["status"] = "error";
-                response["message"] = "Dwell time must be non-negative";
+                response["message"] = "Line frequency must be positive";
             }
             else
             {
-                if (startScan(x_start_param.as<int>(), x_end_param.as<int>(), y_start_param.as<int>(), y_end_param.as<int>(), resolution_param.as<int>(), dwell_time_param.as<int>()))
+                // Pass line_frequency_hz to startScan
+                if (startScan(x_start_param.as<int>(), x_end_param.as<int>(), y_start_param.as<int>(), y_end_param.as<int>(), resolution_param.as<int>(), line_frequency_param.as<float>()))
                 {
                     response["status"] = "started";
-                    response["message"] = "Scan initiated";
+                    response["message"] = "Continuous scan initiated";
                     response["x_start"] = x_start_param.as<int>();
                     response["x_end"] = x_end_param.as<int>();
                     response["y_start"] = y_start_param.as<int>();
                     response["y_end"] = y_end_param.as<int>();
                     response["resolution"] = resolution_param.as<int>();
-                    response["dwell_time"] = dwell_time_param.as<int>();
+                    response["line_frequency_hz"] = line_frequency_param.as<float>(); // Report the new parameter
                 }
                 else
                 {
@@ -1932,26 +1923,21 @@ String processCommand(const String &json_command)
         }
         else if (doc["action"] == "get_data")
         {
-            String format = doc["format"] | "json"; // Default to json -> this setting is now ignored for data itself
+            // This part remains the same, data is pushed via CSV
+            String format = doc["format"] | "json";
 
-            // Data is pushed automatically. This command only returns status.
-            // Check if scan is finished and buffer is empty
             if (current_afm_state.scan_buffer_count == 0 && !current_afm_state.scan_active)
             {
                 response["status"] = "scan_complete";
                 response["message"] = "Scan finished and all data sent.";
-                // No data points to send, just return the status.
             }
             else
             {
                 response["status"] = "success";
                 response["message"] = "Scan status provided. Data is pushed via CSV stream.";
                 response["scan_active"] = current_afm_state.scan_active;
-                response["points_in_buffer"] = current_afm_state.scan_buffer_count; // Use buffer count
-                                                                                    // response["data_waiting_send"] = scan_data_ready_to_send.load(); // This flag is less informative now
+                response["points_in_buffer"] = current_afm_state.scan_buffer_count;
             }
-            // No data is attached here anymore
-            // Fall through to serialize and return the JSON response
         }
         else
         {
@@ -2005,33 +1991,6 @@ String processCommand(const String &json_command)
 // ============================================================================
 
 TaskHandle_t control_task_handle;
-TaskHandle_t pid_task_handle;
-
-void pidControlTask(void *parameter)
-{
-    // Subscribe this task to the Task Watchdog Timer
-    esp_task_wdt_add(NULL);
-
-    TickType_t xLastWakeTime;
-    const TickType_t xFrequency = pdMS_TO_TICKS(1); // 1ms period for 1kHz control loop
-    xLastWakeTime = xTaskGetTickCount();
-
-    while (1)
-    {
-        // Wait for the next cycle using vTaskDelayUntil for precise timing
-        vTaskDelayUntil(&xLastWakeTime, xFrequency);
-
-        // Only update ADC and PID if PID is enabled
-        if (current_afm_state.pid_enabled)
-        {
-            updateAFMState(); // Get latest ADC reading
-            updatePIDControl();
-        }
-
-        // Reset watchdog
-        esp_task_wdt_reset();
-    }
-}
 
 void controlTask(void *parameter)
 {
@@ -2040,10 +1999,9 @@ void controlTask(void *parameter)
 
     // Variable to store the start time of the previous iteration
     static uint64_t lastStartTime = 0;
+    int count = 0;
     while (1)
     {
-        // Wait for the next cycle.
-
         // --- Measure Period and Frequency ---
         uint64_t currentStartTime = esp_timer_get_time();
         uint32_t period_us = 0;
@@ -2058,7 +2016,6 @@ void controlTask(void *parameter)
             current_afm_state.control_loop_count++;
 
             // Reset accumulator periodically to prevent overflow and keep average relevant
-            // Reset after ~1 million samples (adjust as needed)
             if (current_afm_state.control_loop_count >= 1000000)
             {
                 // Start new average with last period
@@ -2066,31 +2023,22 @@ void controlTask(void *parameter)
                 current_afm_state.control_loop_count = 1;
             }
         }
-        lastStartTime = currentStartTime; // Store current start time for the next iteration's calculation
+        lastStartTime = currentStartTime;
 
-        // Perform control actions (Execution time of these does not affect frequency measurement)
+        // Perform control actions
         updateMotorMovement();
         updateDacRamp();  // Handles XY ramps (and potentially non-approach Z)
         updateApproach(); // Handles approach state machine, including calling updateZramp
         updateScan();
-
-        // Only update AFM state if PID is not enabled (PID task handles it otherwise)
-        if (!current_afm_state.pid_enabled)
-        {
-            updateAFMState();
-        }
-
+        updateAFMState();
+        updatePIDControl();
         // Reset the WDT after completing the work for this cycle
         esp_task_wdt_reset();
-
-        // Small delay/yield to prevent WDT issues on very fast loops and allow lower priority tasks
-        if (current_afm_state.control_loop_last_period_us < 100)
-        {                                 // e.g., faster than 10kHz
-            vTaskDelay(pdMS_TO_TICKS(1)); // Yield for 1ms
-        }
-        else
+        if (++count == 1000)
         {
-            taskYIELD(); // Yield briefly if loop is slower
+            // Occasionally yield or reset WDT
+            count = 0;
+            portYIELD(); // Or just yield CPU briefly
         }
     }
 }
@@ -2101,6 +2049,11 @@ void controlTask(void *parameter)
 
 void setup()
 {
+    // Disable WiFi
+    WiFi.disconnect(true);  // Disconnect and clear saved credentials
+    WiFi.mode(WIFI_OFF);    // Turn off WiFi radio
+    delay(100);             // Give some time for WiFi to turn off
+
     disableCore0WDT(); // Only if your task is pinned to core 0
 
     // Create the mutex for scan buffer protection
@@ -2122,24 +2075,13 @@ void setup()
     while (!Serial)
         delay(1);
 
-    // Create PID control task with higher priority than main control task
-    xTaskCreatePinnedToCore(
-        pidControlTask,
-        "PIDTask",
-        4096,
-        NULL,
-        configMAX_PRIORITIES - 1, // Highest priority
-        &pid_task_handle,
-        1 // Run on core 1
-    );
-
     // Create main control task
     xTaskCreatePinnedToCore(
         controlTask,
         "ControlTask",
         4096,
         NULL,
-        configMAX_PRIORITIES - 2, // Lower priority than PID
+        configMAX_PRIORITIES - 1, // Highest priority
         &control_task_handle,
         0 // Run on core 0
     );
@@ -2168,9 +2110,4 @@ void loop()
             Serial.println(response_string);
         }
     }
-
-    // We could add a small delay here if needed, but the controlTask
-    // runs independently. Ensure this loop runs fast enough to
-    // call sendScanDataBuffer promptly when needed.
-    // delay(1); // Example: small delay if CPU usage is too high
 }
