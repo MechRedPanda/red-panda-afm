@@ -8,7 +8,7 @@ from afm import AFM, AFMState
 from ui.focus_widget import Ui_FocusWidget
 from ui.main_window import Ui_MainWindow
 from ui.approach_widget import Ui_ApproachWidget
-from ui.scan_widget import Ui_ApproachWidget as Ui_ScanWidget
+from ui.scan_widget import Ui_ScanWidget
 import numpy as np
 from pyqtgraph import ImageView
 from datetime import datetime
@@ -41,8 +41,6 @@ class FocusWidget(QMainWindow, Ui_FocusWidget):
 
         self.adc_0_plot = self.focus_plot_widget.plot(
             pen=pg.mkPen('b', width=5), name="ADC 0")
-        self.adc_1_plot = self.focus_plot_widget.plot(
-            pen=pg.mkPen('r', width=5), name="ADC 1")
 
         # Add vertical line for optimal focus value
         self.optimal_line = self.focus_plot_widget.addLine(x=None, angle=90, pen=pg.mkPen(
@@ -84,10 +82,8 @@ class FocusWidget(QMainWindow, Ui_FocusWidget):
         if self.afm.focus_results:
             dac_f_values = [result[0] for result in self.afm.focus_results]
             adc_0_values = [result[1] for result in self.afm.focus_results]
-            adc_1_values = [result[2] for result in self.afm.focus_results]
 
             self.adc_0_plot.setData(dac_f_values, adc_0_values)
-            self.adc_1_plot.setData(dac_f_values, adc_1_values)
 
             # Check if focus has stopped or finished and we haven't shown results yet
             if not self.afm.is_focus_running() and not self.has_shown_results:
@@ -303,12 +299,13 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
 
         # --- UI Setup ---
         # Scan parameters defaults
-        self.x_start_input.setText("30000")
-        self.x_end_input.setText("35000")
-        self.y_start_input.setText("30000")
-        self.y_end_input.setText("35000")
+        self.x_start_input.setText("10000")
+        self.x_end_input.setText("60000")
+        self.y_start_input.setText("10000")
+        self.y_end_input.setText("60000")
         self.scan_resolution_input.setText("128")
-        self.line_frequency_input.setText("1")  # Default to 1kHz line frequency
+        self.y_microstep_input.setText("64")  # Default to 1 microstep
+        self.step_delay_us_input.setText("20")  # Default to 0 delay
 
         # --- Initialize Plots and Images ---
         # Titles and labels for the plots
@@ -380,7 +377,8 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
             y_start = int(self.y_start_input.text())
             y_end = int(self.y_end_input.text())
             resolution = int(self.scan_resolution_input.text())
-            line_frequency_hz = float(self.line_frequency_input.text())
+            y_micro_steps = int(self.y_microstep_input.text())
+            y_micro_step_wait_us = int(self.step_delay_us_input.text())
 
             # Validation
             if not all(0 <= v <= 65535 for v in [x_start, x_end, y_start, y_end]):
@@ -392,8 +390,11 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
             if resolution < 2:
                 QMessageBox.warning(self, "Invalid Input", "Resolution must be at least 2")
                 return
-            if line_frequency_hz <= 0:
-                QMessageBox.warning(self, "Invalid Input", "Line frequency must be positive")
+            if y_micro_steps < 1:
+                QMessageBox.warning(self, "Invalid Input", "Y micro-steps must be at least 1")
+                return
+            if y_micro_step_wait_us < 0:
+                QMessageBox.warning(self, "Invalid Input", "Y micro-step wait time cannot be negative")
                 return
 
             # Prepare for new scan
@@ -414,7 +415,8 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
                 y_start=y_start,
                 y_end=y_end,
                 resolution=resolution,
-                line_frequency_hz=line_frequency_hz
+                y_micro_steps=y_micro_steps,
+                y_micro_step_wait_us=y_micro_step_wait_us
             )
 
             if not success:
@@ -530,54 +532,29 @@ class ScanWidget(QMainWindow, Ui_ScanWidget):
             # Get filename from input or generate default
             filename = self.save_data_filename.text().strip()
             if not filename:
-                # Generate default filenames for both trace and retrace
+                # Generate default folder name
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 resolution = self.afm.scan_resolution
-                trace_adc_filename = f"{self.data_dir}/{timestamp}_trace_adc0_{resolution}x{resolution}.tiff"
-                trace_dacz_filename = f"{self.data_dir}/{timestamp}_trace_dacz_{resolution}x{resolution}.tiff"
-                retrace_adc_filename = f"{self.data_dir}/{timestamp}_retrace_adc0_{resolution}x{resolution}.tiff"
-                retrace_dacz_filename = f"{self.data_dir}/{timestamp}_retrace_dacz_{resolution}x{resolution}.tiff"
+                folder_name = f"{self.data_dir}/{timestamp}_{resolution}x{resolution}"
             else:
                 # Use user-provided filename as base
-                base_path = os.path.join(self.data_dir, os.path.splitext(filename)[0])
-                trace_adc_filename = f"{base_path}_trace_adc0.tiff"
-                trace_dacz_filename = f"{base_path}_trace_dacz.tiff"
-                retrace_adc_filename = f"{base_path}_retrace_adc0.tiff"
-                retrace_dacz_filename = f"{base_path}_retrace_dacz.tiff"
+                folder_name = os.path.join(self.data_dir, os.path.splitext(filename)[0])
 
-            # Export all combinations
-            success = True
-            if self.afm.export_tiff(trace_adc_filename, scan_type="trace", channel="adc0"):
-                print(f"Saved trace ADC0 data to {trace_adc_filename}")
-            else:
-                success = False
-                print(f"Failed to save trace ADC0 data")
+            # Create the folder
+            os.makedirs(folder_name, exist_ok=True)
 
-            if self.afm.export_tiff(trace_dacz_filename, scan_type="trace", channel="dacz"):
-                print(f"Saved trace DACZ data to {trace_dacz_filename}")
-            else:
-                success = False
-                print(f"Failed to save trace DACZ data")
-
-            if self.afm.export_tiff(retrace_adc_filename, scan_type="retrace", channel="adc0"):
-                print(f"Saved retrace ADC0 data to {retrace_adc_filename}")
-            else:
-                success = False
-                print(f"Failed to save retrace ADC0 data")
-
-            if self.afm.export_tiff(retrace_dacz_filename, scan_type="retrace", channel="dacz"):
-                print(f"Saved retrace DACZ data to {retrace_dacz_filename}")
-            else:
-                success = False
-                print(f"Failed to save retrace DACZ data")
-
-            if success:
-                QMessageBox.information(self, "Success", "Scan data saved successfully")
-            else:
-                QMessageBox.warning(self, "Partial Success", "Some scan data could not be saved")
+            # Export all channels (both ADC0 and DACZ)
+            try:
+                success = self.afm.export_tiff(folder_name, channels=[0, 1])
+                if success:
+                    QMessageBox.information(self, "Success", "Scan data saved successfully")
+                else:
+                    QMessageBox.warning(self, "Error", "Failed to save scan data")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Error saving scan data: {str(e)}")
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error saving scan data: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error preparing to save scan data: {str(e)}")
 
     def closeEvent(self, event):
         """Ensure timer is stopped and scan is stopped when window closes."""

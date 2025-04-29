@@ -13,6 +13,7 @@ import queue # Added for response queue
 import gwyfile # For saving GWY files
 from gwyfile.objects import GwyContainer, GwyDataField
 import tifffile
+import os
 
 # Default serial port settings
 DEFAULT_PORT = None  # Will auto-detect if None
@@ -106,6 +107,10 @@ class AFM:
         self.scan_x_end = 0
         self.scan_y_start = 0
         self.scan_y_end = 0
+        
+        # Add new Y-axis control attributes
+        self.scan_y_micro_steps = 1  # Number of micro-steps between data collection points
+        self.scan_y_micro_step_wait_us = 0  # Wait time between micro-steps in microseconds
 
     # Serial Communication Methods
     def get_serial_ports(self) -> List[Any]:
@@ -1066,7 +1071,9 @@ class AFM:
 
     # Scan Methods
     def start_scan(self, x_start: int, x_end: int, y_start: int, y_end: int,
-                     resolution: int, line_frequency_hz: float) -> bool:
+                     resolution: int,
+                     y_micro_steps: int = 1,
+                     y_micro_step_wait_us: int = 0) -> bool:
         """Start a scan procedure on the ESP32 (push model).
 
         Args:
@@ -1075,7 +1082,8 @@ class AFM:
             y_start (int): Starting DAC value for Y-axis.
             y_end (int): Ending DAC value for Y-axis.
             resolution (int): Number of points per axis (e.g., 256 for 256x256).
-            line_frequency_hz (float): Line scan frequency in Hz.
+            y_micro_steps (int): Number of micro-steps between data collection points.
+            y_micro_step_wait_us (int): Wait time between micro-steps in microseconds.
 
         Returns:
             bool: True if scan started successfully, False otherwise.
@@ -1091,9 +1099,6 @@ class AFM:
         if not all(isinstance(v, int) for v in (x_start, x_end, y_start, y_end, resolution)):
             print("Scan range and resolution must be integers.")
             return False
-        if not isinstance(line_frequency_hz, (int, float)):
-            print("Line frequency must be a number.")
-            return False
         if x_start < 0 or x_start > 65535 or x_end < 0 or x_end > 65535 or \
            y_start < 0 or y_start > 65535 or y_end < 0 or y_end > 65535:
              print("DAC coordinates out of range (0-65535)")
@@ -1104,8 +1109,11 @@ class AFM:
         if resolution < 2:
             print("Resolution must be at least 2.")
             return False
-        if line_frequency_hz <= 0:
-            print("Line frequency must be positive.")
+        if y_micro_steps < 1:
+            print("Y micro-steps must be at least 1.")
+            return False
+        if y_micro_step_wait_us < 0:
+            print("Y micro-step wait time cannot be negative.")
             return False
 
         # Acquire busy lock
@@ -1126,6 +1134,9 @@ class AFM:
             self.scan_x_end = x_end
             self.scan_y_start = y_start
             self.scan_y_end = y_end
+            # Store Y-axis control parameters
+            self.scan_y_micro_steps = y_micro_steps
+            self.scan_y_micro_step_wait_us = y_micro_step_wait_us
             # Optimistically set state, confirmed by ESP32 later
             self.current_state = AFMState.SCANNING
             self.scan_running = True
@@ -1138,7 +1149,8 @@ class AFM:
                 "y_start": y_start,
                 "y_end": y_end,
                 "resolution": resolution,
-                "line_frequency_hz": line_frequency_hz,
+                "y_micro_steps": y_micro_steps,
+                "y_micro_step_wait_us": y_micro_step_wait_us
             }
 
             # Send command and wait for confirmation
@@ -1157,6 +1169,9 @@ class AFM:
                 self.scan_x_end = 0
                 self.scan_y_start = 0
                 self.scan_y_end = 0
+                # Reset Y-axis control parameters
+                self.scan_y_micro_steps = 1
+                self.scan_y_micro_step_wait_us = 0
                 self.set_idle() # Release busy lock and reset internal state
                 return False
 
@@ -1169,6 +1184,10 @@ class AFM:
             self.scan_x_end = 0
             self.scan_y_start = 0
             self.scan_y_end = 0
+            # Reset Y-axis control parameters
+            self.scan_y_resolution = 0
+            self.scan_y_micro_steps = 1
+            self.scan_y_micro_step_wait_us = 0
             if self.busy:
                 self.set_idle() # Ensure cleanup on error
             return False
@@ -1330,20 +1349,40 @@ class AFM:
             "scan_state": self.current_state.name
         }
 
-    def export_tiff(self, filename, channels=None):
+    def export_tiff(self, folder_path, channels=None):
         """
-        Export scan data as TIFF files, one file per channel and scan type.
+        Export scan data as TIFF files in the specified folder.
         
         Args:
-            filename (str): Base path for the TIFF files (will append channel name and scan type)
+            folder_path (str): Path to the folder where files will be saved
             channels (list): List of channel indices to export (0 for ADC0, 1 for DACZ)
         """
         if not self.scan_data_trace or not self.scan_data_retrace:
             raise ValueError("No scan data available")
         
+        # Create folder if it doesn't exist
+        os.makedirs(folder_path, exist_ok=True)
+        
         # Default to both channels if none specified
         if channels is None:
             channels = [0, 1]
+        
+        # Get current timestamp
+        current_time = datetime.now()
+        timestamp_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Create metadata dictionary
+        metadata = {
+            "timestamp": timestamp_str,
+            "scan_parameters": {
+                "x_start": self.scan_x_start,
+                "x_end": self.scan_x_end,
+                "y_start": self.scan_y_start,
+                "y_end": self.scan_y_end,
+                "resolution": self.scan_resolution,
+            },
+            "data_summary": {}
+        }
         
         # Process each channel and scan type
         for channel_idx in channels:
@@ -1353,13 +1392,40 @@ class AFM:
                 if image is None:
                     continue
                     
+                # Count NaN values
+                nan_count = np.isnan(image).sum()
+                total_pixels = image.size
+                nan_percentage = (nan_count / total_pixels) * 100
+                
                 # Create filename for this channel and scan type
                 channel_name = "ADC0" if channel_idx == 0 else "DACZ"
-                channel_filename = f"{filename}_{channel_name}_{scan_type}.tiff"
+                channel_filename = f"{scan_type}_{channel_name}.tiff"
+                full_path = os.path.join(folder_path, channel_filename)
                 
                 # Save as TIFF
-                tifffile.imwrite(channel_filename, image)
+                tifffile.imwrite(full_path, image.T)
                 
+                # Add to metadata
+                metadata["data_summary"][f"{scan_type}_{channel_name}"] = {
+                    "nan_count": int(nan_count),
+                    "total_pixels": int(total_pixels),
+                    "nan_percentage": float(nan_percentage),
+                    "min_value": float(np.nanmin(image)),
+                    "max_value": float(np.nanmax(image))
+                }
+                
+                # Print debugging info
+                print(f"Exported {channel_filename}:")
+                print(f"  NaN values: {nan_count}/{total_pixels} ({nan_percentage:.2f}%)")
+                print(f"  Min value: {np.nanmin(image):.2f}")
+                print(f"  Max value: {np.nanmax(image):.2f}")
+        
+        # Save metadata to JSON file
+        metadata_path = os.path.join(folder_path, "scan_metadata.json")
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=4)
+            
+        print(f"\nMetadata saved to {metadata_path}")
         return True
 
     def get_scan_line(self, scan_type: str = "trace") -> Optional[np.ndarray]:
@@ -1447,7 +1513,10 @@ if __name__ == "__main__":
         try:
             # Example: Start a scan
             print("Starting scan...")
-            if afm.start_scan(x_start=10000, x_end=55000, y_start=10000, y_end=55000, resolution=8, line_frequency_hz=10):
+            afm.reset()
+            
+
+            if afm.start_scan(x_start=10000, x_end=55000, y_start=10000, y_end=55000, resolution=256, y_micro_steps=32, y_micro_step_wait_us=10):
                 print("Scan initiated.")
                 # Monitor scan progress
                 while afm.is_scan_running():
@@ -1475,7 +1544,7 @@ if __name__ == "__main__":
             print("\nExporting scan data as TIFF files...")
             
             # Export trace data with all channels
-            if afm.export_tiff("data/test/scan", channels=[0, 1]):
+            if afm.export_tiff("data/test/scan_001", channels=[0, 1]):
                 print("Successfully exported trace data")
             
 

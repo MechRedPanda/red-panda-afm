@@ -12,6 +12,22 @@
 #include "freertos/semphr.h"
 #include "freertos/portmacro.h"
 
+// ============================================================================
+// Configuration
+// ============================================================================
+#define DEBUG_ENABLED 0 // Set to 0 to disable all debug output
+
+// Debug output macros - these will compile to nothing when debugging is disabled
+#if DEBUG_ENABLED
+#define DEBUG_PRINT(x) Serial.print(x)
+#define DEBUG_PRINTLN(x) Serial.println(x)
+#define DEBUG_PRINTF(format, ...) Serial.printf(format, __VA_ARGS__)
+#else
+#define DEBUG_PRINT(x)
+#define DEBUG_PRINTLN(x)
+#define DEBUG_PRINTF(format, ...)
+#endif
+
 // Forward declarations
 void sendScanDataBuffer();
 
@@ -24,7 +40,7 @@ class PIDController
 public:
     PIDController(float kp = 1.0f, float ki = 0.0f, float kd = 0.0f,
                   float integralMin = -50000.0f, float integralMax = 50000.0f,
-                  float slewRate = 1000000.0f)
+                  float slewRate = 100000.0f)
         : kp_(kp), ki_(ki), kd_(kd), integral_min_(integralMin),
           integral_max_(integralMax), slew_rate_(slewRate)
     {
@@ -61,16 +77,25 @@ public:
         last_error_ = 0;
         last_feedback_ = 0;
         last_output_ = 0;
-        last_time_ = 0;
+        last_time_ = 0;  // Initialize to 0 to trigger first run protection
         filtered_d_term_ = 0;
     }
 
     float compute(float setpoint, float feedback)
     {
-        uint32_t now = millis();
+        uint64_t now = esp_timer_get_time();
         uint32_t dt = now - last_time_;
-        if (dt == 0)
+        
+        // First run protection
+        if (last_time_ == 0) {
+            last_time_ = now;
+            last_feedback_ = feedback;
+            last_output_ = feedback;  // Initialize with current feedback value
             return last_output_;
+        }
+
+        // Clamp minimum dt to 10us to prevent erratic integral updates
+        if (dt < 100) dt = 100;
 
         float error = setpoint - feedback;
         if (invert_)
@@ -79,31 +104,24 @@ public:
         // Proportional term
         float p_term = kp_ * error;
 
-        // Integral term with anti-windup
-        float pre_integral = integral_;
-        integral_ += ki_ * error * dt / 1000.0f;
+        // Integral term with simple anti-windup (just clamping)
+        integral_ += ki_ * error * dt / 1000000.0f;  // Convert microseconds to seconds
         integral_ = constrain(integral_, integral_min_, integral_max_);
 
-        // Back-calculation anti-windup
-        if (integral_ != pre_integral)
-        {
-            float windup = integral_ - pre_integral;
-            integral_ = pre_integral + windup * 0.5f; // Reduce windup effect
+        // Derivative term calculation (skip if Kd = 0)
+        float d_term = 0.0f;
+        if (kd_ != 0.0f) {
+            float d_term_raw = -kd_ * (feedback - last_feedback_) / (dt / 1000000.0f);
+            filtered_d_term_ = alpha_ * filtered_d_term_ + (1.0f - alpha_) * d_term_raw;
+            d_term = filtered_d_term_;
         }
-
-        // Derivative term on process variable (not error) to reduce kicks
-        float d_term_raw = -kd_ * (feedback - last_feedback_) / (dt / 1000.0f);
-
-        // Low-pass filter on derivative term
-        filtered_d_term_ = alpha_ * filtered_d_term_ + (1.0f - alpha_) * d_term_raw;
-        float d_term = filtered_d_term_;
 
         // Calculate output with bias
         float pid_output = p_term + integral_ + d_term;
         float desired_output = pid_output + bias_;
 
         // Slew rate limiting
-        float max_change = slew_rate_ * dt / 1000.0f;
+        float max_change = slew_rate_ * dt / 1000000.0f;
         float delta = desired_output - last_output_;
         if (abs(delta) > max_change)
         {
@@ -143,7 +161,7 @@ private:
     float last_error_ = 0;
     float last_feedback_ = 0;
     float last_output_ = 0;
-    uint32_t last_time_ = 0;
+    uint64_t last_time_ = 0;  // Change from uint32_t to uint64_t for microsecond timing
 
     // Output limits
     float output_min_ = 0;
@@ -165,21 +183,7 @@ private:
     float filtered_d_term_ = 0;
 };
 
-// ============================================================================
-// Configuration
-// ============================================================================
-#define DEBUG_ENABLED 0 // Set to 0 to disable all debug output
 
-// Debug output macros - these will compile to nothing when debugging is disabled
-#if DEBUG_ENABLED
-#define DEBUG_PRINT(x) Serial.print(x)
-#define DEBUG_PRINTLN(x) Serial.println(x)
-#define DEBUG_PRINTF(format, ...) Serial.printf(format, __VA_ARGS__)
-#else
-#define DEBUG_PRINT(x)
-#define DEBUG_PRINTLN(x)
-#define DEBUG_PRINTF(format, ...)
-#endif
 
 // ============================================================================
 // Global Constants
@@ -298,6 +302,7 @@ struct AFMState
     uint16_t dac_z_val = (1 << 15);
     uint16_t adc_0_val = 0;
     uint16_t adc_1_val = 0;
+    uint16_t max_dac_y_step = 1;  // Add this line for Y DAC step limiting
 
     // ADC Moving Average
     float adc_0_avg = 0.0f;
@@ -335,6 +340,7 @@ struct AFMState
     int approach_direction = 0;
     uint16_t approach_threshold = 0;
     float approach_initial_adc = 0.0f;
+    uint16_t approach_initial_dac_z = 0;  // Add this field to store initial DAC Z value
     int32_t approach_initial_position = 0;
     int32_t approach_max_steps = 0;
     unsigned long approach_polling_interval = 50;
@@ -352,11 +358,22 @@ struct AFMState
     uint16_t scan_x_end = 0;
     uint16_t scan_y_start = 0;
     uint16_t scan_y_end = 0;
-    uint16_t scan_resolution = 256;
+    uint16_t scan_resolution = 256;  // Unified resolution for both X and Y
     uint16_t scan_current_x_index = 0;
     uint16_t scan_current_x = 0;
     bool scan_y_forward = true;
-    // Removed unused variables: scan_return_line, scan_last_point_time, scan_current_y_index, scan_current_y
+    // Add line start wait configuration
+    uint32_t scan_line_start_wait_ms = 10; // Default 10ms wait at start of each line
+    uint64_t scan_line_start_wait_until_us = 0; // When to end the current wait
+    bool scan_line_waiting = false; // Whether currently waiting at start of line
+
+    // Y-axis step size control
+    uint16_t scan_y_micro_steps = 1;  // Number of micro-steps between data collection points
+    uint16_t scan_y_current_step = 0; // Current step count within a micro-step sequence
+    uint16_t scan_y_total_steps = 0;  // Total steps in Y direction (resolution * micro_steps)
+    uint16_t scan_y_current_micro_step = 0; // Current micro-step index
+    uint32_t scan_y_micro_step_wait_us = 0; // Wait time between micro-steps in microseconds
+    uint64_t scan_y_next_micro_step_time_us = 0; // When to perform the next micro-step
 
     // Continuous Scan State
     bool scan_continuous_y = false;
@@ -373,6 +390,7 @@ struct AFMState
     uint32_t control_loop_last_period_us = 0;
     uint64_t control_loop_total_period_us = 0;
     uint32_t control_loop_count = 0;
+    uint64_t last_control_time_us = 0;  // Add this field
 
     // DAC XY Ramping State
     bool ramp_active = false;
@@ -390,6 +408,9 @@ struct AFMState
     int ramp_total_steps = 0;
     int ramp_current_step = 0;
     uint64_t ramp_next_step_time_us = 0;
+
+    // Scan Data Collection Flag
+    bool scan_data_collected = false;
 };
 
 // ============================================================================
@@ -734,31 +755,19 @@ bool startApproach(uint8_t motor, int step_size, uint16_t threshold, int32_t max
     current_afm_state.approach_data_count = 0; // Clear previous data
     current_afm_state.ramp_active = false;     // Ensure Z ramp isn't active initially
 
-    // Get initial ADC value (update state first)
+    // Get initial ADC value and DAC Z value
     updateAFMState();
-    current_afm_state.approach_initial_adc = current_afm_state.adc_0_avg;
+    current_afm_state.approach_initial_dac_z = current_afm_state.dac_z_val;  // Store initial DAC Z value
     current_afm_state.approach_initial_position = current_afm_state.motors[motor - 1].current_position;
-
-    // Set initial Z position to retracted state
-    dac_z.write(DAC_Z_RETRACT_TARGET);
-    current_afm_state.dac_z_val = DAC_Z_RETRACT_TARGET;
 
     // Log initial data point
     if (current_afm_state.approach_data_count < MAX_APPROACH_POINTS)
     {
         current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
             current_afm_state.approach_total_steps_taken,
-            current_afm_state.approach_initial_adc,
-            current_afm_state.approach_initial_position};
+            current_afm_state.adc_0_avg,
+            current_afm_state.motors[motor - 1].current_position};
     }
-
-    // --- Removed blocking loop ---
-    // bool threshold_met = false;
-    // while (current_afm_state.approach_running) { ... loop content removed ... }
-    // --- Removed Cleanup ---
-    // current_afm_state.approach_running = false;
-    // current_afm_state.current_state = SystemState::IDLE;
-    // return threshold_met;
 
     return true; // Indicate successful initialization
 }
@@ -778,7 +787,7 @@ void stopApproach()
     }
 }
 
-// updateApproach performs one blocking step cycle including Z-probe/retract
+// updateApproach performs one step cycle and checks for interaction
 void updateApproach()
 {
     if (!current_afm_state.approach_running)
@@ -788,13 +797,6 @@ void updateApproach()
     if (current_afm_state.approach_total_steps_taken >= current_afm_state.approach_max_steps)
     {
         stopApproach(); // Max steps reached
-        return;
-    }
-    // Check initial threshold before moving (in case already engaged)
-    updateAFMState(); // Get latest ADC
-    if (abs(current_afm_state.adc_0_avg - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold)
-    {
-        stopApproach(); // Already past threshold
         return;
     }
 
@@ -814,120 +816,37 @@ void updateApproach()
     // --- Blocking Settle Delay ---
     delay(current_afm_state.approach_polling_interval);
 
-    // --- Blocking Z-Probe Cycle ---
-    bool threshold_met_during_probe = false;
-    uint16_t start_z = DAC_Z_RETRACT_TARGET;
-    uint16_t target_z = DAC_Z_PROBE_TARGET;
-    int32_t delta_z = (int32_t)target_z - (int32_t)start_z;
-    int total_steps = Z_CYCLE_STEPS;
-    if (total_steps <= 0)
-        total_steps = 1;
-    uint64_t next_step_time_us = esp_timer_get_time();
+    // --- Check for Interaction ---
+    updateAFMState(); // Get latest ADC and DAC values
 
-    for (int i = 1; i <= total_steps; ++i)
-    {
-        // Wait for step delay using microseconds
-        delayMicroseconds(Z_STEP_DELAY_US);
-
-        // Calculate next Z
-        int64_t intermediate_z = (int64_t)start_z + ((int64_t)delta_z * i) / total_steps;
-        if (intermediate_z < 0)
-            intermediate_z = 0;
-        if (intermediate_z > 65535)
-            intermediate_z = 65535;
-        uint16_t next_z = (uint16_t)intermediate_z;
-
-        // Write Z DAC
-        dac_z.write(next_z);
-        current_afm_state.dac_z_val = next_z;
-
-        // Update ADC State & Check Threshold
-        updateAFMState();
-        if (abs(current_afm_state.adc_0_avg - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold)
-        {
-            threshold_met_during_probe = true;
-            break; // Exit Z-probe loop
-        }
-    }
-    // Ensure final target is reached if loop completed normally
-    if (!threshold_met_during_probe && current_afm_state.dac_z_val != target_z)
-    {
-        dac_z.write(target_z);
-        current_afm_state.dac_z_val = target_z;
-        updateAFMState(); // Update state one last time at the probe target
-        // Check threshold one last time at the very end of probe travel
-        if (abs(current_afm_state.adc_0_avg - current_afm_state.approach_initial_adc) >= current_afm_state.approach_threshold)
-        {
-            threshold_met_during_probe = true;
-        }
-    }
-
-    // --- Handle Probe Result ---
-    if (threshold_met_during_probe)
+    // Check if DAC Z has changed significantly from initial value
+    if (abs(current_afm_state.dac_z_val - current_afm_state.approach_initial_dac_z) >= current_afm_state.approach_threshold)
     {
         // Log final data point where threshold was met
         if (current_afm_state.approach_data_count < MAX_APPROACH_POINTS)
         {
             current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
-                current_afm_state.approach_total_steps_taken + current_afm_state.approach_step_size, // Log steps *including* this one
+                current_afm_state.approach_total_steps_taken + current_afm_state.approach_step_size,
                 current_afm_state.adc_0_avg,
                 current_afm_state.motors[current_afm_state.approach_motor - 1].current_position};
         }
         stopApproach(); // Threshold met
         return;
     }
+
+    // --- Log Data & Increment Step Count ---
+    current_afm_state.approach_total_steps_taken += current_afm_state.approach_step_size;
+    if (current_afm_state.approach_data_count < MAX_APPROACH_POINTS)
+    {
+        current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
+            current_afm_state.approach_total_steps_taken,
+            current_afm_state.adc_0_avg,
+            current_afm_state.motors[current_afm_state.approach_motor - 1].current_position};
+    }
     else
     {
-        // --- Blocking Z-Retract Cycle ---
-        start_z = DAC_Z_PROBE_TARGET; // Start from probe position
-        target_z = DAC_Z_RETRACT_TARGET;
-        delta_z = (int32_t)target_z - (int32_t)start_z;
-        // Use same duration/delay for retract
-        next_step_time_us = esp_timer_get_time();
-
-        for (int i = 1; i <= total_steps; ++i) // Use the same total_steps
-        {
-            delayMicroseconds(Z_STEP_DELAY_US);
-
-            int64_t intermediate_z = (int64_t)start_z + ((int64_t)delta_z * i) / total_steps;
-            if (intermediate_z < 0)
-                intermediate_z = 0;
-            if (intermediate_z > 65535)
-                intermediate_z = 65535;
-            uint16_t next_z = (uint16_t)intermediate_z;
-
-            dac_z.write(next_z);
-            current_afm_state.dac_z_val = next_z;
-        }
-        // Ensure final retract target is reached
-        if (current_afm_state.dac_z_val != target_z)
-        {
-            dac_z.write(target_z);
-            current_afm_state.dac_z_val = target_z;
-        }
-
-        // --- Log Data & Increment Step Count (after successful Z cycle) ---
-        current_afm_state.approach_total_steps_taken += current_afm_state.approach_step_size;
-        if (current_afm_state.approach_data_count < MAX_APPROACH_POINTS)
-        {
-            // Log the ADC value measured at the *probe target* before retracting
-            current_afm_state.approach_data[current_afm_state.approach_data_count++] = {
-                current_afm_state.approach_total_steps_taken,
-                current_afm_state.adc_0_avg, // This holds the value from the end of the probe
-                current_afm_state.motors[current_afm_state.approach_motor - 1].current_position};
-        }
-        else
-        {
-            stopApproach(); // Buffer full
-            return;
-        }
-
-        // --- Final Check after Step Cycle ---
-        if (current_afm_state.approach_total_steps_taken >= current_afm_state.approach_max_steps)
-        {
-            stopApproach(); // Max steps reached
-            return;
-        }
+        stopApproach(); // Buffer full
+        return;
     }
 }
 
@@ -991,7 +910,18 @@ uint16_t calculateDacValue(uint16_t start, uint16_t end, uint16_t index, uint16_
     uint32_t rounded_scaled_index = scaled_index + divisor / 2;
     uint16_t offset = rounded_scaled_index / divisor;
 
-    return start + offset;
+    // Always add the offset - INCORRECT for retrace
+    // return start + offset;
+
+    // Corrected logic: Add or subtract based on direction
+    if (end >= start) {
+        // Forward: Add offset, ensuring no overflow if range is huge (unlikely with uint16_t)
+        uint32_t result = (uint32_t)start + offset;
+        return (result > 65535) ? 65535 : (uint16_t)result;
+    } else {
+        // Retrace: Subtract offset, ensuring no underflow
+        return (offset > start) ? 0 : start - offset;
+    }
 }
 
 // Function to update DAC ramping state machine
@@ -1068,113 +998,91 @@ void updateDacRamp()
 }
 
 bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_end,
-               uint16_t resolution, float line_frequency_hz)
+               uint16_t resolution, uint16_t y_micro_steps, uint32_t y_micro_step_wait_us = 0)
 {
     DEBUG_PRINTLN("# DEBUG: Starting scan with parameters:");
-    DEBUG_PRINTF("# DEBUG: x_start=%d, x_end=%d, y_start=%d, y_end=%d, resolution=%d, line_frequency_hz=%.2f\n",
-                 x_start, x_end, y_start, y_end, resolution, line_frequency_hz);
+    DEBUG_PRINTF("# DEBUG: x_start=%d, x_end=%d, y_start=%d, y_end=%d, resolution=%d, y_micro_steps=%d, y_micro_step_wait_us=%d\n",
+                 x_start, x_end, y_start, y_end, resolution, y_micro_steps, y_micro_step_wait_us);
 
     // Basic validation
-    if (resolution < 2 || line_frequency_hz <= 0.0f)
+    if (resolution < 2 || y_micro_steps < 1)
     {
-        DEBUG_PRINTLN("# DEBUG: Invalid resolution or line frequency");
+        DEBUG_PRINTLN("# DEBUG: Invalid resolution or micro-steps");
         return false;
     }
     if (x_start > x_end || y_start > y_end)
     {
-        DEBUG_PRINTLN("# DEBUG: Invalid range (start > end)");
+        DEBUG_PRINTLN("# DEBUG: Invalid start/end coordinates");
         return false;
     }
-    // Prevent starting if already scanning, moving, approaching, OR RAMPING
-    if (current_afm_state.scan_active || isMotorMoving() || current_afm_state.approach_running || current_afm_state.ramp_active)
+    if (current_afm_state.scan_active || current_afm_state.approach_running)
     {
-        DEBUG_PRINTLN("# DEBUG: Cannot start scan - system busy");
+        DEBUG_PRINTLN("# DEBUG: Another operation is in progress");
         return false;
     }
 
-    // Store parameters
+    // Initialize scan state
     current_afm_state.scan_x_start = x_start;
     current_afm_state.scan_x_end = x_end;
     current_afm_state.scan_y_start = y_start;
     current_afm_state.scan_y_end = y_end;
     current_afm_state.scan_resolution = resolution;
-    current_afm_state.scan_line_frequency_hz = line_frequency_hz;
-
-    // Calculate parameters for continuous scan
-    current_afm_state.scan_continuous_y = true; // Enable continuous mode
-    current_afm_state.scan_points_per_line = resolution;
-    uint32_t y_range = (y_end > y_start) ? (y_end - y_start) : (y_start - y_end);
-    
-    // Calculate total line time in microseconds from frequency
-    uint64_t total_line_time_us = (uint64_t)(1000000.0f / line_frequency_hz);
-    
-    // Calculate point interval based on resolution and line time
-    if (resolution > 1) {
-        current_afm_state.scan_point_interval_us = total_line_time_us / (resolution - 1);
-        // Calculate velocity (DAC units per microsecond)
-        current_afm_state.scan_y_velocity = (float)y_range / total_line_time_us;
-    } else {
-        current_afm_state.scan_point_interval_us = total_line_time_us;
-        current_afm_state.scan_y_velocity = 0;
-    }
-    if (current_afm_state.scan_point_interval_us == 0) current_afm_state.scan_point_interval_us = 1; // Avoid division by zero
-
-    // Initialize scan state variables (indices, direction, etc.)
+    current_afm_state.scan_y_micro_steps = y_micro_steps;
+    current_afm_state.scan_y_total_steps = resolution * y_micro_steps;
+    current_afm_state.scan_y_micro_step_wait_us = y_micro_step_wait_us;
     current_afm_state.scan_current_x_index = 0;
     current_afm_state.scan_y_forward = true;
+    current_afm_state.scan_y_current_step = 0;
+    current_afm_state.scan_y_current_micro_step = 0;
+    current_afm_state.scan_y_next_micro_step_time_us = esp_timer_get_time();
+
+    // Clear scan buffer
     current_afm_state.scan_buffer_head = 0;
     current_afm_state.scan_buffer_tail = 0;
     current_afm_state.scan_buffer_count = 0;
+    scan_data_ready_to_send = false;
 
-    // Calculate target start position
-    uint16_t target_x = calculateDacValue(x_start, x_end, 0, resolution);
-    uint16_t target_y = calculateDacValue(y_start, y_end, 0, resolution);
+    // Calculate initial X and Y positions
+    uint16_t initial_x = calculateDacValue(x_start, x_end, 0, resolution);
+    uint16_t initial_y = y_start;
 
-    // Get current position
-    uint16_t current_x = current_afm_state.dac_x_val;
-    uint16_t current_y = current_afm_state.dac_y_val;
+    // --- Initiate Ramp to Start Position --- 
+    // Instead of direct writes, set up the ramp state
+    current_afm_state.ramp_start_x = current_afm_state.dac_x_val;
+    current_afm_state.ramp_start_y = current_afm_state.dac_y_val;
+    current_afm_state.ramp_target_x = initial_x;
+    current_afm_state.ramp_target_y = initial_y;
+    // current_afm_state.ramp_target_z = current_afm_state.dac_z_val; // Keep Z unchanged (Removed as requested)
 
-    // --- Initiate Ramp if needed (to first scan point) ---
-    if (current_x != target_x || current_y != target_y)
-    {
-        current_afm_state.ramp_target_x = target_x;
-        current_afm_state.ramp_target_y = target_y;
-        current_afm_state.ramp_start_x = current_x;
-        current_afm_state.ramp_start_y = current_y;
-        current_afm_state.ramp_delta_x = target_x - current_x;
-        current_afm_state.ramp_delta_y = target_y - current_y;
-        current_afm_state.ramp_duration_ms = 1000;
-        current_afm_state.ramp_step_delay_ms = 1;
-        if (current_afm_state.ramp_step_delay_ms < 1)
-            current_afm_state.ramp_step_delay_ms = 1;
-        current_afm_state.ramp_total_steps = current_afm_state.ramp_duration_ms / current_afm_state.ramp_step_delay_ms;
+    current_afm_state.ramp_delta_x = (int32_t)initial_x - current_afm_state.ramp_start_x;
+    current_afm_state.ramp_delta_y = (int32_t)initial_y - current_afm_state.ramp_start_y;
+    // current_afm_state.ramp_delta_z = 0; // No Z change for scan start (Removed as requested)
 
-        if (current_afm_state.ramp_total_steps > 0)
-        {
-            current_afm_state.ramp_current_step = 0;
-            current_afm_state.ramp_next_step_time_us = esp_timer_get_time() + (uint64_t)current_afm_state.ramp_step_delay_ms * 1000;
-            current_afm_state.ramp_active = true;
-        }
-        else
-        {
-            dac_x.write(target_x);
-            dac_y.write(target_y);
-            current_afm_state.dac_x_val = target_x;
-            current_afm_state.dac_y_val = target_y;
-            current_afm_state.ramp_active = false;
-        }
-    }
-    else
-    {
-        current_afm_state.ramp_active = false;
-        current_afm_state.dac_x_val = target_x;
-        current_afm_state.dac_y_val = target_y;
-    }
+    const int RAMP_DURATION_MS = 1000;
+    const int RAMP_STEP_DELAY_MS = 1;
+    current_afm_state.ramp_duration_ms = RAMP_DURATION_MS;
+    current_afm_state.ramp_step_delay_ms = (RAMP_STEP_DELAY_MS > 0) ? RAMP_STEP_DELAY_MS : 1; // Ensure > 0
+    current_afm_state.ramp_total_steps = (current_afm_state.ramp_duration_ms + current_afm_state.ramp_step_delay_ms - 1) / current_afm_state.ramp_step_delay_ms;
+    if (current_afm_state.ramp_total_steps <= 0) current_afm_state.ramp_total_steps = 1; // Ensure at least 1 step
 
-    current_afm_state.scan_current_x = target_x;
-    current_afm_state.scan_y_current_dac = target_y;
-    current_afm_state.scan_y_steps_taken = 0;
+    current_afm_state.ramp_current_step = 0;
+    current_afm_state.ramp_next_step_time_us = esp_timer_get_time() + (uint64_t)current_afm_state.ramp_step_delay_ms * 1000;
+    current_afm_state.ramp_active = true; // Activate the ramp
 
+    // Update state variables needed by updateScan *after* the ramp completes
+    current_afm_state.scan_current_x = initial_x;
+    current_afm_state.dac_x_val = current_afm_state.ramp_start_x; // Start ramp from current value
+    current_afm_state.dac_y_val = current_afm_state.ramp_start_y; // Start ramp from current value
+
+    /* Remove direct writes:
+    dac_x.write(initial_x);
+    dac_y.write(initial_y);
+    current_afm_state.dac_x_val = initial_x;
+    current_afm_state.dac_y_val = initial_y;
+    current_afm_state.scan_current_x = initial_x;
+    */
+
+    // Start scan state (but actual movement waits for ramp)
     current_afm_state.scan_active = true;
     current_afm_state.current_state = SystemState::SCANNING;
     DEBUG_PRINTLN("# DEBUG: Scan started successfully");
@@ -1187,162 +1095,178 @@ void updateScan()
     if (!current_afm_state.scan_active)
         return;
 
-    // Wait for initial ramp to complete before starting data acquisition
-    if (current_afm_state.ramp_active)
-        return;
+    // Wait for initial positioning ramp to complete before starting scan steps
+    if (current_afm_state.ramp_active) {
+        // The updateDacRamp() function called in the main control task will handle the ramp.
+        // Once ramp_active becomes false, this check will pass.
+        return; 
+    }
 
     uint64_t current_time_us = esp_timer_get_time();
 
-    // Continuous Y-Ramp and data acquisition
-    if (current_afm_state.scan_continuous_y)
+    // Handle line start wait if needed
+    if (current_afm_state.scan_line_waiting)
     {
-        // Check if it's time to acquire a new data point
-        if (current_time_us >= current_afm_state.scan_next_point_time_us)
+        if (current_time_us >= current_afm_state.scan_line_start_wait_until_us)
         {
-            // Calculate current Y DAC value based on steps taken
-            uint16_t current_y_dac;
-            if (current_afm_state.scan_y_forward)
-            {
-                current_y_dac = calculateDacValue(
-                    current_afm_state.scan_y_start,
-                    current_afm_state.scan_y_end,
-                    current_afm_state.scan_y_steps_taken,
-                    current_afm_state.scan_points_per_line);
-            }
-            else
-            {
-                current_y_dac = calculateDacValue(
-                    current_afm_state.scan_y_end,
-                    current_afm_state.scan_y_start,
-                    current_afm_state.scan_y_steps_taken,
-                    current_afm_state.scan_points_per_line);
-            }
-
-            // Prepare new data point with indices
-            ScanDataPoint new_point;
-            new_point.i = current_afm_state.scan_current_x_index;
-            // For retrace, j index counts down from resolution-1 to 0
-            new_point.j = current_afm_state.scan_y_forward ? 
-                current_afm_state.scan_y_steps_taken : 
-                (current_afm_state.scan_points_per_line - 1 - current_afm_state.scan_y_steps_taken);
-            new_point.adc_0 = adc_0.readADC();
-            new_point.dac_z = current_afm_state.dac_z_val;
-            new_point.is_trace = current_afm_state.scan_y_forward;
-
-            // Store the data point
-            {
-                if (xSemaphoreTake(scan_buffer_mutex, pdMS_TO_TICKS(5)) == pdTRUE)
-                {
-                    if (current_afm_state.scan_buffer_count < SCAN_BUFFER_SIZE)
-                    {
-                        scan_buffer[current_afm_state.scan_buffer_head] = new_point;
-                        current_afm_state.scan_buffer_head = (current_afm_state.scan_buffer_head + 1) % SCAN_BUFFER_SIZE;
-                        current_afm_state.scan_buffer_count++;
-                        scan_data_ready_to_send = true;
-                    }
-                    xSemaphoreGive(scan_buffer_mutex);
-                }
-            }
-
-            // Update Y position tracking
-            current_afm_state.scan_y_current_dac = current_y_dac;
-            current_afm_state.scan_y_steps_taken++;
-
-            // Check if we've completed a Y line (either trace or retrace)
-            if (current_afm_state.scan_y_steps_taken >= current_afm_state.scan_points_per_line)
-            {
-                // If we just completed a trace, start retrace
-                if (current_afm_state.scan_y_forward)
-                {
-                    current_afm_state.scan_y_forward = false;
-                    current_afm_state.scan_y_steps_taken = 0;
-                }
-                // If we just completed a retrace, move to next X position
-                else
-                {
-                    current_afm_state.scan_y_forward = true;
-                    current_afm_state.scan_y_steps_taken = 0;
-
-                    // Move to next X position
-                    current_afm_state.scan_current_x_index++;
-                    if (current_afm_state.scan_current_x_index >= current_afm_state.scan_resolution)
-                    {
-                        // Print last point information
-                        JsonDocument lastPointDoc;
-                        lastPointDoc["command"] = "scan";
-                        lastPointDoc["status"] = "last_point";
-                        lastPointDoc["x_index"] = current_afm_state.scan_current_x_index - 1;
-                        lastPointDoc["y_index"] = current_afm_state.scan_points_per_line - 1;
-                        lastPointDoc["adc_0"] = current_afm_state.adc_0_val;
-                        lastPointDoc["dac_z"] = current_afm_state.dac_z_val;
-                        lastPointDoc["is_trace"] = false;
-                        String lastPointOutput;
-                        serializeJson(lastPointDoc, lastPointOutput);
-                        Serial.println(lastPointOutput);
-                        Serial.flush();
-
-                        // Ensure all data is sent before sending completion message
-                        while (current_afm_state.scan_buffer_count > 0)
-                        {
-                            sendScanDataBuffer();
-                            delay(1); // Small delay to allow serial buffer to clear
-                        }
-                        
-                        // Scan complete - send completion message
-                        JsonDocument scanCompleteDoc;
-                        scanCompleteDoc["command"] = "scan";
-                        scanCompleteDoc["status"] = "complete";
-                        scanCompleteDoc["message"] = "Scan has been completed";
-                        scanCompleteDoc["timestamp"] = millis();
-                        String output;
-                        serializeJson(scanCompleteDoc, output);
-                        Serial.println(output);
-                        Serial.flush();
-
-                        // Update state
-                        current_afm_state.scan_active = false;
-                        current_afm_state.current_state = SystemState::IDLE;
-                        return;
-                    }
-
-                    // Calculate and set new X position
-                    uint16_t new_x = calculateDacValue(
-                        current_afm_state.scan_x_start,
-                        current_afm_state.scan_x_end,
-                        current_afm_state.scan_current_x_index,
-                        current_afm_state.scan_resolution);
-                    dac_x.write(new_x);
-                    current_afm_state.scan_current_x = new_x;
-                }
-            }
-
-            // Schedule next data point acquisition
-            current_afm_state.scan_next_point_time_us = current_time_us + current_afm_state.scan_point_interval_us;
-        }
-
-        // Update Y-DAC position based on elapsed time for smooth movement
-        uint64_t elapsed_time_us = current_time_us - current_afm_state.scan_y_ramp_start_time_us;
-        float y_delta = current_afm_state.scan_y_velocity * elapsed_time_us;
-        
-        uint16_t new_y_dac;
-        if (current_afm_state.scan_y_forward)
-        {
-            new_y_dac = current_afm_state.scan_y_start + (uint16_t)y_delta;
-            if (new_y_dac > current_afm_state.scan_y_end)
-                new_y_dac = current_afm_state.scan_y_end;
+            current_afm_state.scan_line_waiting = false;
         }
         else
         {
-            new_y_dac = current_afm_state.scan_y_end - (uint16_t)y_delta;
-            if (new_y_dac < current_afm_state.scan_y_start)
-                new_y_dac = current_afm_state.scan_y_start;
+            return; // Still waiting
         }
+    }
 
-        // Only update DAC if position has changed
-        if (new_y_dac != current_afm_state.dac_y_val)
+    // Handle micro-step wait if needed
+    // Note: scan_y_current_step tracks micro-steps now, 0 to total_steps-1
+    if (current_afm_state.scan_y_micro_step_wait_us > 0 &&
+        current_time_us < current_afm_state.scan_y_next_micro_step_time_us)
+    {
+        return; // Wait until next micro-step time
+    }
+
+    // --- Update Y DAC ---
+    // Calculate the current resolution index we are stepping towards or are within
+    int current_res_index = current_afm_state.scan_y_current_step / current_afm_state.scan_y_micro_steps;
+    uint16_t target_y_dac;
+    if (current_afm_state.scan_y_forward)
+    {
+        target_y_dac = calculateDacValue(
+            current_afm_state.scan_y_start,
+            current_afm_state.scan_y_end,
+            current_res_index,
+            current_afm_state.scan_resolution);
+    }
+    else // Retrace
+    {
+        target_y_dac = calculateDacValue(
+            current_afm_state.scan_y_end,
+            current_afm_state.scan_y_start,
+            current_res_index,
+            current_afm_state.scan_resolution);
+    }
+
+    // Update Y DAC only if it needs to change
+    if (target_y_dac != current_afm_state.dac_y_val)
+    {
+        DEBUG_PRINTF("# DEBUG: Writing DAC Y = %d (Current: %d)\n", target_y_dac, current_afm_state.dac_y_val);
+        dac_y.write(target_y_dac);
+        current_afm_state.dac_y_val = target_y_dac;
+    }
+
+    // --- Collect Data ---
+    // Check if this micro-step is the *last* one for the current resolution point
+    bool is_last_micro_step = ((current_afm_state.scan_y_current_step + 1) % current_afm_state.scan_y_micro_steps == 0);
+
+    if (is_last_micro_step)
+    {
+        // We've completed the micro-steps for resolution index 'current_res_index'
+        ScanDataPoint new_point;
+        new_point.i = current_afm_state.scan_current_x_index;
+        new_point.j = current_afm_state.scan_y_forward ?
+            current_res_index :
+            (current_afm_state.scan_resolution - 1 - current_res_index);
+
+        // Read the ADC value *managed* by updateAFMState
+        // Choose either the latest raw value or the average:
+        // new_point.adc_0 = current_afm_state.adc_0_val;
+        new_point.adc_0 = static_cast<uint16_t>(current_afm_state.adc_0_avg + 0.5f); // Use average, rounded
+        new_point.dac_z = current_afm_state.dac_z_val;
+        new_point.is_trace = current_afm_state.scan_y_forward;
+
+        // Add data point to buffer
+        if (xSemaphoreTake(scan_buffer_mutex, pdMS_TO_TICKS(5)) == pdTRUE)
         {
-            dac_y.write(new_y_dac);
-            current_afm_state.dac_y_val = new_y_dac;
+            if (current_afm_state.scan_buffer_count < SCAN_BUFFER_SIZE)
+            {
+                scan_buffer[current_afm_state.scan_buffer_head] = new_point;
+                current_afm_state.scan_buffer_head = (current_afm_state.scan_buffer_head + 1) % SCAN_BUFFER_SIZE;
+                current_afm_state.scan_buffer_count++;
+                scan_data_ready_to_send = true;
+            }
+            xSemaphoreGive(scan_buffer_mutex);
+        }
+    }
+
+    // --- Increment Step Counter ---
+    current_afm_state.scan_y_current_step++;
+
+    // --- Schedule Next Wait ---
+    // (This logic remains similar, scheduling based on current time + wait duration)
+    if (current_afm_state.scan_y_micro_step_wait_us > 0)
+    {
+        uint64_t next_step_target = current_afm_state.scan_y_next_micro_step_time_us > current_time_us ?
+                                     current_afm_state.scan_y_next_micro_step_time_us :
+                                     current_time_us; // Base for next wait
+        // Add wait time only if positive
+         current_afm_state.scan_y_next_micro_step_time_us = next_step_target + (uint64_t)current_afm_state.scan_y_micro_step_wait_us;
+
+    } else {
+        // If wait time is 0, ensure next step time doesn't block future iterations unnecessarily
+        current_afm_state.scan_y_next_micro_step_time_us = current_time_us;
+    }
+
+
+    // --- Check for Line Completion ---
+    if (current_afm_state.scan_y_current_step >= current_afm_state.scan_y_total_steps)
+    {
+        // If we just completed a trace, start retrace
+        if (current_afm_state.scan_y_forward)
+        {
+            current_afm_state.scan_y_forward = false;
+            current_afm_state.scan_y_current_step = 0; // Reset micro-step counter for retrace
+            // Start wait for retrace line start
+            current_afm_state.scan_line_waiting = true;
+            current_afm_state.scan_line_start_wait_until_us = current_time_us + (uint64_t)current_afm_state.scan_line_start_wait_ms * 1000;
+        }
+        // If we just completed a retrace, move to next X position
+        else
+        {
+            current_afm_state.scan_y_forward = true;
+            current_afm_state.scan_y_current_step = 0; // Reset micro-step counter for next trace
+
+            // Move to next X position
+            current_afm_state.scan_current_x_index++;
+            if (current_afm_state.scan_current_x_index >= current_afm_state.scan_resolution)
+            {
+                // --- Scan Complete Logic ---
+                // (Ensure final data is sent before completion message)
+                while (current_afm_state.scan_buffer_count > 0)
+                {
+                    sendScanDataBuffer();
+                    delay(1); // Allow buffer to clear
+                }
+
+                // Send completion message
+                JsonDocument scanCompleteDoc;
+                scanCompleteDoc["command"] = "scan";
+                scanCompleteDoc["status"] = "complete";
+                scanCompleteDoc["message"] = "Scan has been completed";
+                scanCompleteDoc["timestamp"] = millis();
+                String output;
+                serializeJson(scanCompleteDoc, output);
+                Serial.println(output);
+                Serial.flush();
+
+                // Update state
+                current_afm_state.scan_active = false;
+                current_afm_state.current_state = SystemState::IDLE;
+                return; // Exit updateScan
+            }
+
+            // Calculate and set new X position
+            uint16_t new_x = calculateDacValue(
+                current_afm_state.scan_x_start,
+                current_afm_state.scan_x_end,
+                current_afm_state.scan_current_x_index,
+                current_afm_state.scan_resolution);
+            DEBUG_PRINTF("# DEBUG: Writing DAC X = %d (Current: %d)\n", new_x, current_afm_state.dac_x_val);
+            dac_x.write(new_x);
+            current_afm_state.scan_current_x = new_x; // Update state
+
+            // Start wait for next line start
+            current_afm_state.scan_line_waiting = true;
+            current_afm_state.scan_line_start_wait_until_us = current_time_us + (uint64_t)current_afm_state.scan_line_start_wait_ms * 1000;
         }
     }
 }
@@ -1694,9 +1618,7 @@ String processCommand(const String &json_command)
             if (doc["target"].is<int>())
             {
                 current_afm_state.pid_target = doc["target"].as<float>();
-                // Reset PID controller state and set initial bias to current Z value
-                current_afm_state.pid_controller.reset();
-                current_afm_state.pid_controller.setBias(current_afm_state.dac_z_val);
+                // Reset PID controller state
                 target_updated = true;
             }
 
@@ -1732,12 +1654,6 @@ String processCommand(const String &json_command)
                 current_afm_state.pid_controller.setInvert(doc["invert"].as<bool>());
             }
 
-            // Only update bias if target was NOT updated
-            if (!target_updated && (doc["bias"].is<float>() || doc["bias"].is<int>()))
-            {
-                current_afm_state.pid_controller.setBias(doc["bias"].as<float>());
-            }
-
             response["status"] = "success";
             response["message"] = "PID parameters updated";
         }
@@ -1748,7 +1664,6 @@ String processCommand(const String &json_command)
             response["kp"] = current_afm_state.pid_controller.getKp();
             response["ki"] = current_afm_state.pid_controller.getKi();
             response["kd"] = current_afm_state.pid_controller.getKd();
-            response["bias"] = current_afm_state.pid_controller.getBias();
             response["invert"] = current_afm_state.pid_controller.getInvert();
             response["current_integral"] = current_afm_state.pid_controller.getIntegral();
             response["current_output"] = current_afm_state.pid_controller.getCurrentOutput();
@@ -1863,13 +1778,13 @@ String processCommand(const String &json_command)
             const auto &y_start_param = doc["y_start"];
             const auto &y_end_param = doc["y_end"];
             const auto &resolution_param = doc["resolution"];
-            const auto &line_frequency_param = doc["line_frequency_hz"]; // New parameter
+            const auto &y_micro_steps_param = doc["y_micro_steps"];
 
             if (!x_start_param.is<int>() || !x_end_param.is<int>() || !y_start_param.is<int>() ||
-                !y_end_param.is<int>() || !resolution_param.is<int>() || !line_frequency_param.is<float>()) // Check new parameter
+                !y_end_param.is<int>() || !resolution_param.is<int>() || !y_micro_steps_param.is<int>())
             {
                 response["status"] = "error";
-                response["message"] = "Missing or invalid required parameters (x_start, x_end, y_start, y_end, resolution, line_frequency_hz must be integers)";
+                response["message"] = "Missing or invalid required parameters (x_start, x_end, y_start, y_end, resolution, y_micro_steps must be integers)";
             }
             else if (x_start_param.as<int>() < 0 || x_start_param.as<int>() > 65535 ||
                      x_end_param.as<int>() < 0 || x_end_param.as<int>() > 65535 ||
@@ -1889,16 +1804,30 @@ String processCommand(const String &json_command)
                 response["status"] = "error";
                 response["message"] = "Resolution must be at least 2";
             }
-            else if (line_frequency_param.as<float>() <= 0.0f) // line_frequency_hz must be positive
+            else if (y_micro_steps_param.as<int>() < 1)
             {
                 response["status"] = "error";
-                response["message"] = "Line frequency must be positive";
+                response["message"] = "Y micro-steps must be at least 1";
             }
             else
             {
-                // Pass line_frequency_hz to startScan
-                if (startScan(x_start_param.as<int>(), x_end_param.as<int>(), y_start_param.as<int>(), y_end_param.as<int>(), resolution_param.as<int>(), line_frequency_param.as<float>()))
+                // Get line start wait time if provided, otherwise use default
+                uint32_t line_start_wait_ms = doc["line_start_wait_ms"] | current_afm_state.scan_line_start_wait_ms;
+                if (line_start_wait_ms > 1000) // Cap at 1 second
+                    line_start_wait_ms = 1000;
+
+                // Get micro-step wait time if provided, otherwise use default
+                uint32_t y_micro_step_wait_us = doc["y_micro_step_wait_us"] | 0;
+                if (y_micro_step_wait_us > 1000000) // Cap at 1 second
+                    y_micro_step_wait_us = 1000000;
+
+                // Pass parameters to startScan
+                if (startScan(x_start_param.as<int>(), x_end_param.as<int>(), y_start_param.as<int>(), y_end_param.as<int>(), 
+                             resolution_param.as<int>(), y_micro_steps_param.as<int>(), y_micro_step_wait_us))
                 {
+                    // Set the line start wait time
+                    current_afm_state.scan_line_start_wait_ms = line_start_wait_ms;
+                    
                     response["status"] = "started";
                     response["message"] = "Continuous scan initiated";
                     response["x_start"] = x_start_param.as<int>();
@@ -1906,7 +1835,9 @@ String processCommand(const String &json_command)
                     response["y_start"] = y_start_param.as<int>();
                     response["y_end"] = y_end_param.as<int>();
                     response["resolution"] = resolution_param.as<int>();
-                    response["line_frequency_hz"] = line_frequency_param.as<float>(); // Report the new parameter
+                    response["y_micro_steps"] = y_micro_steps_param.as<int>();
+                    response["line_start_wait_ms"] = line_start_wait_ms;
+                    response["y_micro_step_wait_us"] = y_micro_step_wait_us;
                 }
                 else
                 {
@@ -2014,6 +1945,7 @@ void controlTask(void *parameter)
             current_afm_state.control_loop_last_period_us = period_us;
             current_afm_state.control_loop_total_period_us += period_us;
             current_afm_state.control_loop_count++;
+            current_afm_state.last_control_time_us = currentStartTime;
 
             // Reset accumulator periodically to prevent overflow and keep average relevant
             if (current_afm_state.control_loop_count >= 1000000)
@@ -2027,18 +1959,19 @@ void controlTask(void *parameter)
 
         // Perform control actions
         updateMotorMovement();
-        updateDacRamp();  // Handles XY ramps (and potentially non-approach Z)
-        updateApproach(); // Handles approach state machine, including calling updateZramp
+        updateDacRamp();
+        updateApproach();
         updateScan();
         updateAFMState();
         updatePIDControl();
+
         // Reset the WDT after completing the work for this cycle
         esp_task_wdt_reset();
         if (++count == 1000)
         {
             // Occasionally yield or reset WDT
             count = 0;
-            portYIELD(); // Or just yield CPU briefly
+            portYIELD();
         }
     }
 }
