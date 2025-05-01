@@ -90,7 +90,11 @@ public:
         if (last_time_ == 0) {
             last_time_ = now;
             last_feedback_ = feedback;
-            last_output_ = feedback;  // Initialize with current feedback value
+            // Calculate initial output using proportional term only
+            float error = setpoint - feedback;
+            if (invert_)
+                error = -error;
+            last_output_ = kp_ * error + bias_;  // Initialize with proportional term plus bias
             return last_output_;
         }
 
@@ -363,7 +367,7 @@ struct AFMState
     uint16_t scan_current_x = 0;
     bool scan_y_forward = true;
     // Add line start wait configuration
-    uint32_t scan_line_start_wait_ms = 10; // Default 10ms wait at start of each line
+    uint32_t scan_line_start_wait_ms = 100; // Default 10ms wait at start of each line
     uint64_t scan_line_start_wait_until_us = 0; // When to end the current wait
     bool scan_line_waiting = false; // Whether currently waiting at start of line
 
@@ -461,6 +465,19 @@ void setupSPI()
 // ============================================================================
 // Device Control Functions
 // ============================================================================
+
+void resetXYDacRange(uint16_t new_mode)
+{
+    // Reset and reinitialize X and Y DACs with new mode
+    dac_x.reset();
+    dac_x.write(1 << 15); // Set to 0V
+    dac_y.reset();
+    dac_y.write(1 << 15); // Set to 0V
+    
+    // Update state
+    current_afm_state.dac_x_val = 1 << 15;
+    current_afm_state.dac_y_val = 1 << 15;
+}
 
 void resetAllDevices()
 {
@@ -1074,14 +1091,6 @@ bool startScan(uint16_t x_start, uint16_t x_end, uint16_t y_start, uint16_t y_en
     current_afm_state.dac_x_val = current_afm_state.ramp_start_x; // Start ramp from current value
     current_afm_state.dac_y_val = current_afm_state.ramp_start_y; // Start ramp from current value
 
-    /* Remove direct writes:
-    dac_x.write(initial_x);
-    dac_y.write(initial_y);
-    current_afm_state.dac_x_val = initial_x;
-    current_afm_state.dac_y_val = initial_y;
-    current_afm_state.scan_current_x = initial_x;
-    */
-
     // Start scan state (but actual movement waits for ramp)
     current_afm_state.scan_active = true;
     current_afm_state.current_state = SystemState::SCANNING;
@@ -1603,6 +1612,8 @@ String processCommand(const String &json_command)
         if (doc["action"] == "enable")
         {
             current_afm_state.pid_enabled = true;
+            // Set bias to current DAC Z value for smooth transition
+            current_afm_state.pid_controller.setBias(current_afm_state.dac_z_val);
             response["status"] = "success";
             response["message"] = "PID control enabled";
         }
@@ -1637,6 +1648,12 @@ String processCommand(const String &json_command)
             if (doc["slew_rate"].is<float>() || doc["slew_rate"].is<int>())
             {
                 current_afm_state.pid_controller.setSlewRate(doc["slew_rate"].as<float>());
+            }
+
+            // Handle bias
+            if (doc["bias"].is<float>() || doc["bias"].is<int>())
+            {
+                current_afm_state.pid_controller.setBias(doc["bias"].as<float>());
             }
 
             // Handle integral limits
@@ -1894,8 +1911,6 @@ String processCommand(const String &json_command)
                 current_afm_state.adc_history_index = 0;
                 current_afm_state.adc_history_count = 0;
                 // Optional: Clear history buffer, but not strictly necessary
-                // memset(current_afm_state.adc_0_history, 0, sizeof(current_afm_state.adc_0_history));
-                // memset(current_afm_state.adc_1_history, 0, sizeof(current_afm_state.adc_1_history));
                 response["status"] = "success";
                 response["message"] = String("ADC average window size set to ") + String(new_size);
             }
@@ -1904,6 +1919,42 @@ String processCommand(const String &json_command)
                 response["status"] = "error";
                 response["message"] = String("Invalid 'window_size' (must be 1-") + String(MAX_ADC_AVG_WINDOW_SIZE) + ")";
             }
+        }
+    }
+    else if (strcmp(command, "set_dac_range") == 0)
+    {
+        const auto &range_param = doc["range"];
+        if (!range_param.is<String>())
+        {
+            response["status"] = "error";
+            response["message"] = "Missing or invalid 'range' parameter (must be '10V' or '3V')";
+        }
+        else
+        {
+            const char* range = range_param.as<const char*>();
+            uint16_t new_mode;
+            
+            if (strcmp(range, "10V") == 0)
+            {
+                new_mode = 0b0000000101000; // +-10V range
+            }
+            else if (strcmp(range, "3V") == 0)
+            {
+                new_mode = 0b0000000101101; // +-3V range
+            }
+            else
+            {
+                response["status"] = "error";
+                response["message"] = "Invalid range (must be '10V' or '3V')";
+                String output;
+                serializeJson(response, output);
+                return output;
+            }
+            
+            // Reset and change range for X and Y DACs
+            resetXYDacRange(new_mode);
+            response["status"] = "success";
+            response["message"] = String("DAC range set to ") + String(range);
         }
     }
     else

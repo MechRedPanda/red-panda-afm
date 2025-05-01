@@ -619,6 +619,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.plot_history_input.editingFinished.connect(self.update_plot_history)
         self._plot_time_window_s = float(self.plot_history_input.text()) # Initial value
 
+        # Setup XY Range combo box
+        self.xy_range_input_box.clear()
+        self.xy_range_input_box.addItems(['10V', '3V'])
+
+        # Connect XY Range control
+        self.xy_range_set_button.clicked.connect(self.set_dac_range)
+        self.xy_range_input_box.currentIndexChanged.connect(self.set_dac_range)
+
     def setup_pid_control(self):
         """Initialize PID control elements and connect signals"""
         # Set up input validation for PID parameters
@@ -1467,6 +1475,28 @@ class MainWindow(QMainWindow, Ui_MainWindow):
              QMessageBox.warning(self, "Invalid Input", "Please enter a valid positive number for plot history (seconds).")
              # Revert to previous value
              self.plot_history_input.setText(str(self._plot_time_window_s))
+
+    def set_dac_range(self):
+        """Handle DAC range setting."""
+        if not self.afm.is_connected():
+            QMessageBox.warning(self, "Not Connected", "Please connect to AFM first.")
+            return
+
+        try:
+            range_mode = self.xy_range_input_box.currentText()
+            if range_mode not in ['10V', '3V']:
+                QMessageBox.warning(self, "Invalid Selection", "Range must be either '10V' or '3V'")
+                return
+
+            success = self.afm.set_dac_range(range_mode)
+
+            if success:
+                QMessageBox.information(self, "Success", f"DAC range set to {range_mode}")
+            else:
+                QMessageBox.warning(self, "Error", "Failed to set DAC range")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error setting DAC range: {str(e)}")
 
     def closeEvent(self, event):
         """Ensure child widgets and AFM connection are closed."""

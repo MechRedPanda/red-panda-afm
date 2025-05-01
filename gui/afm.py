@@ -1504,6 +1504,37 @@ class AFM:
             
         return full_line
 
+    def set_dac_range(self, range_mode: str) -> bool:
+        """
+        Set the range for X and Y DACs.
+        
+        Args:
+            range_mode (str): The desired range mode. Must be either '10V' or '3V'.
+                - '10V': ±10V range
+                - '3V': ±3V range
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if not self.is_connected():
+            return False
+
+        if range_mode not in ['10V', '3V']:
+            print("Error: range_mode must be either '10V' or '3V'")
+            return False
+
+        command = {
+            "command": "set_dac_range",
+            "range": range_mode
+        }
+
+        try:
+            response = self.send_and_receive(command)
+            return response.get("status") == "success"
+        except Exception as e:
+            print(f"Error setting DAC range: {e}")
+            return False
+
 
 if __name__ == "__main__":
     afm = AFM()

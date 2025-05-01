@@ -19,7 +19,7 @@
      <rect>
       <x>20</x>
       <y>30</y>
-      <width>231</width>
+      <width>281</width>
       <height>111</height>
      </rect>
     </property>
@@ -436,8 +436,8 @@
     <property name="geometry">
      <rect>
       <x>30</x>
-      <y>130</y>
-      <width>211</width>
+      <y>140</y>
+      <width>271</width>
       <height>131</height>
      </rect>
     </property>
@@ -518,7 +518,7 @@
      <rect>
       <x>30</x>
       <y>450</y>
-      <width>259</width>
+      <width>271</width>
       <height>141</height>
      </rect>
     </property>
@@ -730,9 +730,9 @@
     <property name="geometry">
      <rect>
       <x>30</x>
-      <y>293</y>
+      <y>280</y>
       <width>271</width>
-      <height>31</height>
+      <height>54</height>
      </rect>
     </property>
     <layout class="QGridLayout" name="gridLayout_4">
@@ -754,6 +754,30 @@
       <widget class="QPushButton" name="avg_points_refresh">
        <property name="text">
         <string>Refresh Avg Points</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="2">
+      <widget class="QPushButton" name="xy_range_set_button">
+       <property name="text">
+        <string>Set X Y Rnage</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="label_14">
+       <property name="text">
+        <string>XY Range</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QComboBox" name="xy_range_input_box">
+       <property name="currentText">
+        <string/>
+       </property>
+       <property name="insertPolicy">
+        <enum>QComboBox::InsertAlphabetically</enum>
        </property>
       </widget>
      </item>

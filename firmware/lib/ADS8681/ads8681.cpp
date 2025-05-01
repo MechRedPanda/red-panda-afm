@@ -28,16 +28,31 @@ uint16_t ADC_ads8681::readADC(void)
   uint8_t tx[4] = {0, 0, 0, 0};
   uint8_t rx[4];
 
-  // Read the result of the previous conversion
-  // Note: We don't wait for the new conversion to complete
-  // This gives us pipelined operation - conversion and reading overlap
+  // === Step 1: Pull CS low to start frame ===
   digitalWrite(_cs_pin, LOW);
   spi->beginTransaction(_spi_settings);
-  spi->transfer(rx, 4);  // Second NOP to get previous result
+
+  // === Step 2: Send 32-bit NOP ===
+  spi->transfer(tx, 4);
+
+  spi->endTransaction();
+  digitalWrite(_cs_pin, HIGH); // === Step 3: Pull CS high to trigger conversion ===
+
+  // === Step 4: Wait for conversion to complete ===
+  delayMicroseconds(5); // (~665ns typical, 1us is safe)
+
+  // === Step 5: Pull CS low again to read ===
+  digitalWrite(_cs_pin, LOW);
+  spi->beginTransaction(_spi_settings);
+
+  spi->transfer(rx, 4); // Read the new result
+
   spi->endTransaction();
   digitalWrite(_cs_pin, HIGH);
 
-  uint16_t result = ((uint16_t)rx[0] << 8) | rx[1];
+  // === Extract the 16-bit ADC result ===
+  uint16_t result = ((uint16_t)rx[0] << 8) | rx[1]; // ADS868x: ADC result is upper 16 bits
+
   return result;
 }
 
