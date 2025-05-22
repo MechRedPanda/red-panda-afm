@@ -468,7 +468,11 @@ void setupSPI()
 
 void resetXYDacRange(uint16_t new_mode)
 {
-    // Reset and reinitialize X and Y DACs with new mode
+    // Update the mode/range of X and Y DACs
+    dac_x.setMode(new_mode);
+    dac_y.setMode(new_mode);
+    
+    // Reset DACs to apply the new mode
     dac_x.reset();
     dac_x.write(1 << 15); // Set to 0V
     dac_y.reset();

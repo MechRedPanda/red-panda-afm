@@ -50,6 +50,12 @@ void AD5761::write_volt(float voltage)
     write(CMD_WR_UPDATE_DAC_REG, set_val);
 }
 
+void AD5761::setMode(uint16_t mode)
+{
+    _mode = mode;  // Update the internal mode member variable
+    write(CMD_WR_CTRL_REG, _mode);  // Write to the control register to apply the new mode
+}
+
 void AD5761::read(uint8_t reg_addr_cmd)
 {
     digitalWrite(_cs, LOW);

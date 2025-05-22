@@ -47,7 +47,8 @@ public:
   void write(uint8_t reg_addr_cmd, uint16_t reg_data);
   void write_volt(float voltage);
   void read(uint8_t reg_addr_cmd);
-
+  
+  void setMode(uint16_t mode);
   void reset();
 
 private:
