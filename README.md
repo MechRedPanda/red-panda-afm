@@ -13,6 +13,9 @@ This project aims to create a low-cost Atomic Force Microscope (AFM) using a 3D 
 - OPU
 - AFM probe
 
+## Getting Started
+Ready to build your own AFM? Check out our comprehensive [Building Instructions](BUILD_GUIDE.md) for step-by-step assembly guidance.
+
 ## License
 This project is licensed under the MIT License.
 
