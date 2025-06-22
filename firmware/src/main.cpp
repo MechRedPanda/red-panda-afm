@@ -2059,7 +2059,8 @@ void setup()
 
     // Initialize serial communication
     Serial.setRxBufferSize(2048);
-    Serial.begin(921600);
+    Serial.begin(115200);
+    Serial.println("Serial communication initialized");
     while (!Serial)
         delay(1);
 

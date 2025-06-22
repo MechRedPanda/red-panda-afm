@@ -10,14 +10,12 @@ from typing import Dict, Optional, Union, List, Tuple, Any
 from dataclasses import dataclass, field
 import numpy as np
 import queue # Added for response queue
-import gwyfile # For saving GWY files
-from gwyfile.objects import GwyContainer, GwyDataField
 import tifffile
 import os
 
 # Default serial port settings
 DEFAULT_PORT = None  # Will auto-detect if None
-BAUDRATE = 921600
+BAUDRATE = 115200
 TIMEOUT = 1
 QUEUE_MAXLEN = 10000
 SERIAL_READ_TIMEOUT = 0.1 # Timeout for serial read attempts in background thread
